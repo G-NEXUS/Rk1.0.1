@@ -54,6 +54,74 @@ app.use('/api', async (req, res, next) => {
   if (!useUpstreamProxy()) return next();
 
   try {
+    // Storefront visit counter (handled locally when upstream does not provide analytics)
+    if (req.method === 'POST' && req.path === '/analytics/visit') {
+      const stats = await db.recordSiteVisit(req.body?.visitorId);
+      return res.json({ ok: true, ...stats });
+    }
+
+    // Admin overview stats (registered users + website visitors)
+    if (req.method === 'GET' && req.path === '/admin/stats') {
+      const authHeader = req.headers.authorization || '';
+      if (!authHeader) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const meRes = await fetchUpstream('/api/auth/me', {
+        method: 'GET',
+        headers: { Authorization: authHeader },
+      });
+      if (!meRes.ok) {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+      const meData = await meRes.json().catch(() => ({}));
+      if (!meData?.user?.isAdmin) {
+        return res.status(403).json({ error: 'Admin access required.' });
+      }
+
+      const extraUsers = [meData.user];
+      // Check if upstream already exposes /api/admin/stats; otherwise combine local analytics with known users
+      try {
+        const upstreamStatsRes = await fetchUpstream('/api/admin/stats', {
+          method: 'GET',
+          headers: { Authorization: authHeader },
+        });
+        const upstreamType = upstreamStatsRes.headers.get('content-type') || '';
+        if (upstreamStatsRes.ok && upstreamType.includes('application/json')) {
+          const upstreamStats = await upstreamStatsRes.json();
+          if (typeof upstreamStats?.registeredUsers === 'number') {
+            const localStats = await db.getAdminStats({ extraUsers });
+            return res.json({
+              registeredUsers: upstreamStats.registeredUsers,
+              websiteVisitors: Math.max(Number(upstreamStats.websiteVisitors) || 0, localStats.websiteVisitors),
+              totalViews: Math.max(Number(upstreamStats.totalViews) || 0, localStats.totalViews),
+            });
+          }
+        }
+      } catch {
+        // Upstream does not expose /api/admin/stats yet; fall through to local aggregation
+      }
+
+      try {
+        const ordersRes = await fetchUpstream('/api/orders', {
+          method: 'GET',
+          headers: { Authorization: authHeader },
+        });
+        if (ordersRes.ok) {
+          const ordersData = await ordersRes.json().catch(() => ({}));
+          if (Array.isArray(ordersData.orders)) {
+            for (const ord of ordersData.orders) {
+              if (ord?.email || ord?.uid) extraUsers.push({ uid: ord.uid, email: ord.email });
+            }
+          }
+        }
+      } catch {
+        // Ignore transient order lookup issues for stats
+      }
+
+      const stats = await db.getAdminStats({ extraUsers });
+      return res.json(stats);
+    }
+
     // Convenience aggregate endpoint supported alongside /api/products & /api/categories
     if (req.method === 'GET' && req.path === '/store') {
       const [prodRes, catRes] = await Promise.all([
@@ -89,6 +157,15 @@ app.use('/api', async (req, res, next) => {
     const upstreamRes = await fetchUpstream(req.originalUrl, init);
     const contentType = upstreamRes.headers.get('content-type') || 'application/json';
     const text = await upstreamRes.text();
+
+    if (upstreamRes.ok && contentType.includes('application/json') && ['/auth/login', '/auth/register', '/auth/me'].includes(req.path)) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.user) db.recordKnownUsers([parsed.user]);
+      } catch {
+        // Ignore parse errors
+      }
+    }
 
     res.status(upstreamRes.status).type(contentType).send(text);
   } catch (err) {
@@ -499,6 +576,25 @@ app.delete('/api/messages/:id', requireAdmin, async (req, res, next) => {
   try {
     await db.deleteMessage(req.params.id);
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Analytics & Admin Stats ----------
+app.post('/api/analytics/visit', async (req, res, next) => {
+  try {
+    const stats = await db.recordSiteVisit(req.body?.visitorId);
+    res.json({ ok: true, ...stats });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/admin/stats', requireAdmin, async (req, res, next) => {
+  try {
+    const stats = await db.getAdminStats();
+    res.json(stats);
   } catch (err) {
     next(err);
   }

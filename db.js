@@ -115,6 +115,11 @@ function loadLocalStore() {
     orders: [],
     messages: [],
     passwordResets: [],
+    analytics: {
+      totalViews: 0,
+      visitorIds: [],
+      knownUserKeys: [],
+    },
   };
   try {
     if (!fs.existsSync(LOCAL_STORE_PATH)) return empty;
@@ -123,6 +128,7 @@ function loadLocalStore() {
       ...empty,
       ...parsed,
       metaCategories: { ...empty.metaCategories, ...(parsed.metaCategories || {}) },
+      analytics: { ...empty.analytics, ...(parsed.analytics || {}) },
     };
   } catch {
     return empty;
@@ -667,6 +673,111 @@ async function consumePasswordReset(rawToken, newPasswordHash) {
   return true;
 }
 
+// ---------- Analytics & Admin Stats ----------
+function userIdentityKey(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  const email = String(entry.email || '').trim().toLowerCase();
+  if (email) return `email:${email}`;
+  const uid = String(entry.uid || entry.firebaseUid || '').trim();
+  if (uid) return `uid:${uid}`;
+  return '';
+}
+
+function recordKnownUsers(entries = []) {
+  if (!Array.isArray(entries) || !entries.length) return;
+  if (!memoryStore.analytics) {
+    memoryStore.analytics = { totalViews: 0, visitorIds: [], knownUserKeys: [] };
+  }
+  const known = new Set(Array.isArray(memoryStore.analytics.knownUserKeys) ? memoryStore.analytics.knownUserKeys : []);
+  let changed = false;
+  for (const entry of entries) {
+    const key = userIdentityKey(entry);
+    if (key && !known.has(key)) {
+      known.add(key);
+      changed = true;
+    }
+  }
+  if (changed) {
+    memoryStore.analytics.knownUserKeys = [...known];
+    persistLocalStore();
+  }
+}
+
+async function recordSiteVisit(visitorId) {
+  const cleanId = String(visitorId || '').trim().slice(0, 128);
+  if (!isMongoReady()) {
+    if (!memoryStore.analytics) {
+      memoryStore.analytics = { totalViews: 0, visitorIds: [], knownUserKeys: [] };
+    }
+    memoryStore.analytics.totalViews = (Number(memoryStore.analytics.totalViews) || 0) + 1;
+    if (cleanId) {
+      const set = new Set(Array.isArray(memoryStore.analytics.visitorIds) ? memoryStore.analytics.visitorIds : []);
+      set.add(cleanId);
+      memoryStore.analytics.visitorIds = [...set];
+    }
+    persistLocalStore();
+    return {
+      totalViews: memoryStore.analytics.totalViews,
+      websiteVisitors: memoryStore.analytics.visitorIds.length,
+    };
+  }
+
+  const update = {
+    $setOnInsert: { key: 'analytics' },
+    $inc: { totalViews: 1 },
+  };
+  if (cleanId) {
+    update.$addToSet = { visitorIds: cleanId };
+  }
+  const doc = await Meta.findOneAndUpdate(
+    { _id: 'analytics' },
+    update,
+    { upsert: true, new: true }
+  ).lean();
+  return {
+    totalViews: Number(doc?.totalViews) || 0,
+    websiteVisitors: Array.isArray(doc?.visitorIds) ? doc.visitorIds.length : 0,
+  };
+}
+
+async function countUsers() {
+  if (isMongoReady()) {
+    return User.countDocuments({});
+  }
+  const combined = new Set(
+    Array.isArray(memoryStore.analytics?.knownUserKeys) ? memoryStore.analytics.knownUserKeys : []
+  );
+  for (const u of memoryStore.users || []) {
+    const key = userIdentityKey(u);
+    if (key) combined.add(key);
+  }
+  return combined.size;
+}
+
+async function getAdminStats({ extraUsers = [] } = {}) {
+  if (Array.isArray(extraUsers) && extraUsers.length) {
+    recordKnownUsers(extraUsers);
+  }
+  if (isMongoReady()) {
+    const [registeredUsers, doc] = await Promise.all([
+      User.countDocuments({}),
+      Meta.findOne({ $or: [{ _id: 'analytics' }, { key: 'analytics' }] }).lean(),
+    ]);
+    return {
+      registeredUsers: Number(registeredUsers) || 0,
+      websiteVisitors: Array.isArray(doc?.visitorIds) ? doc.visitorIds.length : 0,
+      totalViews: Number(doc?.totalViews) || 0,
+    };
+  }
+  const analytics = memoryStore.analytics || { totalViews: 0, visitorIds: [], knownUserKeys: [] };
+  const registeredUsers = await countUsers();
+  return {
+    registeredUsers,
+    websiteVisitors: Array.isArray(analytics.visitorIds) ? analytics.visitorIds.length : 0,
+    totalViews: Number(analytics.totalViews) || 0,
+  };
+}
+
 module.exports = {
   connectDB,
   isMongoReady,
@@ -689,4 +800,8 @@ module.exports = {
   deleteMessage,
   createPasswordReset,
   consumePasswordReset,
+  countUsers,
+  recordKnownUsers,
+  recordSiteVisit,
+  getAdminStats,
 };

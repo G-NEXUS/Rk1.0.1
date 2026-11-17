@@ -13,6 +13,7 @@ const store = {
     allOrders: [],      // admin only
     myOrders: [],       // signed-in customer's own orders
     messages: [],       // contact-form messages (admin only)
+    adminStats: { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 },
     recentOrders: {},   // orders placed in this session
     user: null,         // { uid, name, email, isAdmin }
     loadError: false    // true when the product list could not be loaded
@@ -150,8 +151,19 @@ async function loadUserCollections(user) {
         } catch (error) {
             console.error('Could not load messages:', error);
         }
+        try {
+            const statsData = await apiRequest('/api/admin/stats');
+            store.adminStats = {
+                registeredUsers: Number(statsData.registeredUsers) || 0,
+                websiteVisitors: Number(statsData.websiteVisitors) || 0,
+                totalViews: Number(statsData.totalViews) || 0
+            };
+        } catch (error) {
+            console.error('Could not load admin stats:', error);
+        }
     } else {
         store.messages = [];
+        store.adminStats = { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 };
     }
 }
 
@@ -211,6 +223,7 @@ function logout() {
     store.allOrders = [];
     store.myOrders = [];
     store.messages = [];
+    document.body.classList.remove('is-admin-view');
     apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
     window.location.hash = '#/home';
     if (appReady && typeof renderPage === 'function') renderPage();
@@ -742,9 +755,11 @@ function renderAdmin(tab = 'overview') {
     lastAdminTab = tab;
     const user = getCurrentUser();
     if (!user?.isAdmin) {
+        document.body.classList.remove('is-admin-view');
         location.hash = '#/login';
         return;
     }
+    document.body.classList.add('is-admin-view');
     const products = getProducts();
     const categories = getCategories(products);
     const orders = getAllOrders();
@@ -752,14 +767,17 @@ function renderAdmin(tab = 'overview') {
     let content;
     if (tab === 'overview') {
         const sales = orders.reduce((sum, order) => sum + Number(order.total), 0);
+        const stats = store.adminStats || { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 };
         content = `<h2 class="mb-20">Store Overview</h2>
-            <div class="stats-grid">
-                <div class="stat-card"><p>Total Sales</p><div class="stat-val">${formatMoney(sales)}</div></div>
+            <div class="stats-grid overview-stats">
+                <div class="stat-card stat-card-featured"><p>Total Sales</p><div class="stat-val">${formatMoney(sales)}</div></div>
+                <div class="stat-card"><p>Inventory</p><div class="stat-val">${products.length}</div></div>
                 <div class="stat-card"><p>Total Orders</p><div class="stat-val">${orders.length}</div></div>
-                <div class="stat-card"><p>Products</p><div class="stat-val">${products.length}</div></div>
+                <div class="stat-card"><p>Registered Users</p><div class="stat-val">${Number(stats.registeredUsers) || 0}</div></div>
+                <div class="stat-card"><p>Website Visitors</p><div class="stat-val">${Number(stats.websiteVisitors) || 0}</div><small>${Number(stats.totalViews) || 0} total view${Number(stats.totalViews) === 1 ? '' : 's'}</small></div>
             </div>`;
     } else if (tab === 'inventory') {
-        content = `<div class="section-heading"><h2>Inventory Management</h2><button class="btn" onclick="openProductModal()">+ Add Product</button></div>
+        content = `<h2 class="mb-20">Inventory Management</h2>
             <div class="stats-grid inventory-stats">
                 <div class="stat-card"><p>Inventory</p><div class="stat-val">${products.length}</div></div>
                 <div class="stat-card"><p>Total Orders</p><div class="stat-val">${orders.length}</div></div>
@@ -775,6 +793,9 @@ function renderAdmin(tab = 'overview') {
                 </form>
                 <ul class="category-list">${categories.map(category => `<li><span>${escapeHtml(category)}</span>${[['size', 'Size', categoryNeedsSize(category)], ['color', 'Color', categoryNeedsColor(category)]].map(([option, label, on]) => `<button type="button" class="category-toggle${on ? ' is-on' : ''}" aria-pressed="${on}" aria-label="${label} option for ${escapeHtml(category)}: ${on ? 'on' : 'off'}" data-category="${escapeHtml(category)}" data-option="${option}" onclick="toggleCategoryOption(this)">${label}: ${on ? 'On' : 'Off'}</button>`).join('')}<button type="button" class="remove-btn" aria-label="Remove ${escapeHtml(category)} category" data-category="${escapeHtml(category)}" onclick="removeCategory(this)">Remove</button></li>`).join('')}</ul>
             </section>
+            <div class="inventory-add-wrap">
+                <button type="button" class="btn" onclick="openProductModal()">+ Add Product</button>
+            </div>
             <div class="table-wrap"><table><thead><tr><th>ID</th><th>Photo</th><th>Product</th><th>Category</th><th>Price</th><th>Actions</th></tr></thead><tbody>${products.map(product => { const safeId = escapeHtml(String(product.id)); return `<tr><td>${safeId}</td><td><img class="inventory-thumb" src="${escapeHtml(product.image)}" alt=""></td><td>${escapeHtml(product.name)}</td><td>${escapeHtml(product.category)}</td><td>${formatMoney(product.price)}${hasBulk(product) ? `<br><small>${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}</td><td><div class="inventory-actions"><button class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button><button class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button></div></td></tr>`; }).join('')}</tbody></table></div>`;
     } else if (tab === 'contacts') {
         content = contactsMarkup(getMessages());
@@ -783,15 +804,51 @@ function renderAdmin(tab = 'overview') {
     } else {
         content = orderTrackingMarkup(orders);
     }
+    const adminNavItems = [
+        {
+            key: 'overview',
+            label: 'Overview',
+            icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg>'
+        },
+        {
+            key: 'inventory',
+            label: 'Inventory',
+            icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3.5 7.5 12 12l8.5-4.5L12 3Z"/><path d="M3.5 12 12 16.5 20.5 12"/><path d="M3.5 16.5 12 21l8.5-4.5"/></svg>'
+        },
+        {
+            key: 'orders',
+            label: 'Orders',
+            icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M8 12h8M8 16h5"/></svg>'
+        },
+        {
+            key: 'reports',
+            label: 'Reports',
+            icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"/><path d="M7 16v-5"/><path d="M12 16V7"/><path d="M17 16v-8"/></svg>'
+        },
+        {
+            key: 'contacts',
+            label: 'Contacts',
+            badge: unreadMessages,
+            icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>'
+        }
+    ];
     app.innerHTML = `<div class="admin-page">
-        <nav class="admin-tabs" aria-label="Admin sections">
-            <button type="button" class="admin-tab ${tab === 'overview' ? 'active' : ''}" aria-current="${tab === 'overview' ? 'page' : 'false'}" onclick="renderAdmin('overview')">Overview</button>
-            <button type="button" class="admin-tab ${tab === 'inventory' ? 'active' : ''}" aria-current="${tab === 'inventory' ? 'page' : 'false'}" onclick="renderAdmin('inventory')">Inventory</button>
-            <button type="button" class="admin-tab ${tab === 'orders' ? 'active' : ''}" aria-current="${tab === 'orders' ? 'page' : 'false'}" onclick="renderAdmin('orders')">Orders</button>
-            <button type="button" class="admin-tab ${tab === 'reports' ? 'active' : ''}" aria-current="${tab === 'reports' ? 'page' : 'false'}" onclick="renderAdmin('reports')">Reports</button>
-            <button type="button" class="admin-tab ${tab === 'contacts' ? 'active' : ''}" aria-current="${tab === 'contacts' ? 'page' : 'false'}" onclick="renderAdmin('contacts')">Contacts${unreadMessages ? ` <span class="tab-badge" aria-label="${unreadMessages} unread">${unreadMessages}</span>` : ''}</button>
-        </nav>
+        <div class="admin-header">
+            <span class="admin-header-badge">Admin Dashboard</span>
+            <a href="#/profile" class="btn btn-outline btn-small">← Profile</a>
+        </div>
         <section>${content}</section>
+        <nav class="admin-bottom-nav" aria-label="Admin sections">
+            <div class="admin-bottom-nav-inner">
+                ${adminNavItems.map(item => `<button type="button" class="admin-bottom-item${tab === item.key ? ' is-active' : ''}" aria-current="${tab === item.key ? 'page' : 'false'}" onclick="renderAdmin('${item.key}')">
+                    <span class="admin-bottom-icon">
+                        ${item.icon}
+                        ${item.badge ? `<span class="admin-bottom-badge" aria-label="${item.badge} unread">${item.badge > 99 ? '99+' : item.badge}</span>` : ''}
+                    </span>
+                    <span class="admin-bottom-label">${item.label}</span>
+                </button>`).join('')}
+            </div>
+        </nav>
     </div>`;
     app.append(document.getElementById('tpl-product-modal').content.cloneNode(true));
     // Category choices come from the data, so they are filled in here.
@@ -1047,6 +1104,7 @@ function renderPage() {
             : (authSettled ? '<a href="#/login">Login</a> <a href="#/register">Register</a>' : '');
     }
     updateBottomNav(page);
+    document.body.classList.toggle('is-admin-view', page === 'admin' && Boolean(user?.isAdmin));
     // Account pages need to know who is logged in; everything else can show straight away.
     if (!authSettled && ['profile', 'dashboard', 'admin', 'checkout'].includes(page)) {
         app.innerHTML = loadingMarkup;
@@ -1832,7 +1890,30 @@ setInterval(async () => {
     refreshView();
 }, 15000);
 
+function trackSiteVisit() {
+    if (routeInfo().page === 'admin') return;
+    try {
+        if (sessionStorage.getItem('rk_visit_logged')) return;
+        let visitorId = localStorage.getItem('rk_visitor_id');
+        if (!visitorId) {
+            visitorId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+                ? crypto.randomUUID()
+                : `v-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+            localStorage.setItem('rk_visitor_id', visitorId);
+        }
+        sessionStorage.setItem('rk_visit_logged', '1');
+        fetch('/api/analytics/visit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ visitorId })
+        }).catch(() => {});
+    } catch {
+        // Ignore storage restrictions
+    }
+}
+
 (async function boot() {
+    trackSiteVisit();
     await dataReady;
     appReady = true;
     if (!location.hash) location.hash = '#/home';
