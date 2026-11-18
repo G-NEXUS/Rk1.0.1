@@ -27,6 +27,48 @@ function sameId(first, second) {
     return String(first ?? '') === String(second ?? '');
 }
 
+let toastTimer = null;
+function showToast(message, type = 'info') {
+    const el = document.getElementById('app-toast');
+    if (!el) return;
+    el.textContent = String(message || '');
+    el.className = `app-toast${type === 'error' ? ' is-error' : type === 'success' ? ' is-success' : ''}`;
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.hidden = true; }, type === 'error' ? 5000 : 3200);
+}
+
+function askConfirm(message) {
+    return new Promise(resolve => {
+        const modal = document.getElementById('app-confirm-modal');
+        const msgEl = document.getElementById('app-confirm-message');
+        const okBtn = document.getElementById('app-confirm-ok');
+        const cancelBtn = document.getElementById('app-confirm-cancel');
+        if (!modal || !msgEl || !okBtn || !cancelBtn) {
+            resolve(true);
+            return;
+        }
+        msgEl.textContent = String(message || 'Are you sure?');
+        modal.hidden = false;
+        const finish = (answer) => {
+            modal.hidden = true;
+            okBtn.onclick = null;
+            cancelBtn.onclick = null;
+            modal.onclick = null;
+            resolve(answer);
+        };
+        okBtn.onclick = () => finish(true);
+        cancelBtn.onclick = () => finish(false);
+        modal.onclick = (e) => { if (e.target === modal) finish(false); };
+    });
+}
+
+function isImageFile(file) {
+    if (!file) return false;
+    if (file.type && file.type.startsWith('image/')) return true;
+    return /\.(jpe?g|png|webp|gif|bmp|avif|svg|heic|heif)$/i.test(file.name || '');
+}
+
 function getAuthToken() {
     try {
         return localStorage.getItem(AUTH_TOKEN_KEY) || '';
@@ -52,17 +94,23 @@ async function apiRequest(url, options = {}) {
     const token = getAuthToken();
     if (token) headers.Authorization = `Bearer ${token}`;
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 35000);
+
     let response;
     try {
         response = await fetch(url, {
             method: options.method || 'GET',
             headers,
-            body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+            body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+            signal: controller.signal
         });
     } catch {
         const netErr = new Error('Network error. Check your connection and try again.');
         netErr.code = 'auth/network-request-failed';
         throw netErr;
+    } finally {
+        clearTimeout(timer);
     }
 
     const data = await response.json().catch(() => ({}));
@@ -107,20 +155,26 @@ function rememberOrder(order) {
 
 // ---------- Storefront sync ----------
 async function loadStoreData({ silent = false } = {}) {
-    try {
-        const [productsData, categoriesData] = await Promise.all([
-            apiRequest('/api/products'),
-            apiRequest('/api/categories')
-        ]);
-        store.loadError = false;
-        store.products = Array.isArray(productsData.products) ? productsData.products : [];
-        store.categories = Array.isArray(categoriesData.categories) ? categoriesData.categories : [];
-        store.sizeCategories = Array.isArray(categoriesData.sizeCategories) ? categoriesData.sizeCategories : [];
-        store.colorCategories = Array.isArray(categoriesData.colorCategories) ? categoriesData.colorCategories : [];
-        if (appReady && typeof refreshView === 'function') refreshView();
-    } catch (error) {
-        console.error('Could not load storefront data:', error);
-        if (!silent) store.loadError = true;
+    let attempts = 2;
+    while (attempts > 0) {
+        try {
+            const storeData = await apiRequest('/api/store');
+            store.loadError = false;
+            store.products = Array.isArray(storeData.products) ? storeData.products : [];
+            store.categories = Array.isArray(storeData.categories) ? storeData.categories : [];
+            store.sizeCategories = Array.isArray(storeData.sizeCategories) ? storeData.sizeCategories : [];
+            store.colorCategories = Array.isArray(storeData.colorCategories) ? storeData.colorCategories : [];
+            if (appReady && typeof refreshView === 'function') refreshView();
+            return;
+        } catch (error) {
+            attempts--;
+            if (attempts > 0) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            } else {
+                console.warn('Could not load storefront data:', error);
+                if (!silent) store.loadError = true;
+            }
+        }
     }
 }
 
@@ -142,14 +196,14 @@ async function loadUserCollections(user) {
             store.allOrders = [];
         }
     } catch (error) {
-        console.error('Could not load orders:', error);
+        console.warn('Could not load orders:', error);
     }
     if (user.isAdmin) {
         try {
             const messagesData = await apiRequest('/api/messages');
             store.messages = Array.isArray(messagesData.messages) ? messagesData.messages : [];
         } catch (error) {
-            console.error('Could not load messages:', error);
+            console.warn('Could not load messages:', error);
         }
         try {
             const statsData = await apiRequest('/api/admin/stats');
@@ -159,7 +213,7 @@ async function loadUserCollections(user) {
                 totalViews: Number(statsData.totalViews) || 0
             };
         } catch (error) {
-            console.error('Could not load admin stats:', error);
+            console.warn('Could not load admin stats:', error);
         }
     } else {
         store.messages = [];
@@ -186,7 +240,7 @@ async function syncSession({ redraw = false } = {}) {
         store.user = data.user || null;
         if (!store.user) setAuthToken('');
     } catch (error) {
-        console.error('Could not check login status:', error);
+        console.warn('Could not check login status:', error);
         if (token !== syncCounter) return store.user;
         store.user = null;
     }
@@ -272,7 +326,18 @@ function addToCart(productId, quantity = 1, options = {}) {
     return true;
 }
 
-// ---------- Bulk pricing ----------
+// ---------- Promotion & Bulk pricing ----------
+function hasPromo(product) {
+    if (!product || product.promoPrice === undefined || product.promoPrice === null || product.promoPrice === '') return false;
+    const promoPrice = Number(product.promoPrice);
+    const normalPrice = Number(product.price);
+    return Number.isFinite(promoPrice) && promoPrice >= 0 && Number.isFinite(normalPrice) && promoPrice < normalPrice;
+}
+
+function baseUnitPrice(product) {
+    return hasPromo(product) ? Number(product.promoPrice) : (Number(product?.price) || 0);
+}
+
 // A product can have a lower "bulk price" that applies when the cart holds at least
 // `bulkMinQty` of it (all colors and sizes of that product are counted together).
 function hasBulk(product) {
@@ -294,7 +359,11 @@ function bulkApplies(item, cart = getCart()) {
 }
 
 function cartUnitPrice(item, cart = getCart()) {
-    return bulkApplies(item, cart) ? Number(item.bulkPrice) : (Number(item.price) || 0);
+    const base = baseUnitPrice(item);
+    if (bulkApplies(item, cart)) {
+        return Math.min(base, Number(item.bulkPrice));
+    }
+    return base;
 }
 
 function cartTotal(cart = getCart()) {
@@ -409,6 +478,13 @@ function cartSummaryMarkup(productId) {
         <a href="#/cart" class="btn btn-outline btn-small">View Cart</a>`;
 }
 
+function priceDisplayMarkup(product) {
+    if (hasPromo(product)) {
+        return `<span class="price-original">${formatMoney(product.price)}</span><span class="price-promo">${formatMoney(product.promoPrice)}</span>`;
+    }
+    return formatMoney(product.price);
+}
+
 function productCard(product) {
     const needsOptions = hasOptions(product);
     const inCart = isInCart(product.id);
@@ -417,7 +493,7 @@ function productCard(product) {
     return `<article class="product-card">
         <div class="product-image"><a href="#/product?id=${encodeURIComponent(product.id)}"><img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}"></a></div>
         <div class="product-info">
-            <div><h3 class="product-title">${escapeHtml(product.name)}</h3><p class="product-price">${formatMoney(product.price)}</p>${bulkLineMarkup(product)}</div>
+            <div><h3 class="product-title">${escapeHtml(product.name)}</h3><p class="product-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</p>${bulkLineMarkup(product)}</div>
             <button class="btn btn-full${inCart ? ' is-added' : ''}" data-cart-id="${safeId}" data-original-text="${idleText}" onclick="addToCartFromButton('${safeId}')">${inCart ? 'Added to Cart ✓' : idleText}</button>
         </div>
     </article>`;
@@ -578,7 +654,7 @@ function renderProduct() {
         <div class="detail-info">
             <p class="eyebrow">${escapeHtml(product.category)}</p>
             <h1>${escapeHtml(product.name)}</h1>
-            <p class="detail-price">${formatMoney(product.price)}</p>
+            <p class="detail-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</p>
             ${hasBulk(product) ? `<p class="detail-bulk">Buy ${Number(product.bulkMinQty)} or more: <strong>${formatMoney(product.bulkPrice)}</strong> each</p>` : ''}
             <p class="detail-desc">${escapeHtml(product.description || 'No description available.')}</p>
             <div class="product-options">${renderProductOptions(product)}</div>
@@ -721,7 +797,7 @@ function renderDashboard(tab = 'profile') {
     const orders = getMyOrders();
     let content = '';
     if (tab === 'orders') {
-        content = `<h2 class="mb-20">Order History</h2>${orders.length ? [...orders].reverse().map(order => `<article class="order-card"><div class="order-header"><div><strong>Order ${escapeHtml(order.id)}</strong><p>Placed on ${escapeHtml(order.date)}</p></div><span class="status-badge">${escapeHtml(order.status)}</span></div><div class="summary-row"><span>${order.items.length} items</span><strong class="text-accent">${formatMoney(order.total)}</strong></div></article>`).join('') : '<article class="order-card"><p>No orders found yet.</p><a href="#/home" class="btn btn-small mt-20">Start Shopping</a></article>'}`;
+        content = `<h2 class="mb-20">Order History</h2>${orders.length ? [...orders].reverse().map(order => `<article class="order-card"><div class="order-header"><div><strong>Order ${escapeHtml(order.id)}</strong><p>Placed on ${escapeHtml(order.date)}</p></div><span class="status-badge">${escapeHtml(order.status)}</span></div><div class="summary-row"><span>${order.items.length} items</span><strong class="text-accent">${formatMoney(getOrderTotal(order))}</strong></div></article>`).join('') : '<article class="order-card"><p>No orders found yet.</p><a href="#/home" class="btn btn-small mt-20">Start Shopping</a></article>'}`;
     } else if (tab === 'addresses') {
         content = `<h2 class="mb-20">Saved Addresses</h2><article class="order-card"><p>No saved addresses yet.</p></article>`;
     } else {
@@ -751,6 +827,17 @@ function renderDashboard(tab = 'profile') {
     </section>`;
 }
 
+function getOrderTotal(order) {
+    if (!order) return 0;
+    const itemsTotal = Array.isArray(order.items)
+        ? order.items.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 0), 0)
+        : 0;
+    const direct = Number(order.total);
+    if (itemsTotal > 0) return itemsTotal;
+    if (Number.isFinite(direct) && direct >= 0) return direct;
+    return 0;
+}
+
 function renderAdmin(tab = 'overview') {
     lastAdminTab = tab;
     const user = getCurrentUser();
@@ -766,22 +853,20 @@ function renderAdmin(tab = 'overview') {
     const unreadMessages = getMessages().filter(item => !item.read).length;
     let content;
     if (tab === 'overview') {
-        const sales = orders.reduce((sum, order) => sum + Number(order.total), 0);
+        const uniqueOrders = Array.from(new Map(orders.map(o => [String(o.id || Math.random()), o])).values());
+        const summary = summarizeOrders(uniqueOrders);
+        const sales = summary.made;
         const stats = store.adminStats || { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 };
         content = `<h2 class="mb-20">Store Overview</h2>
             <div class="stats-grid overview-stats">
-                <div class="stat-card stat-card-featured"><p>Total Sales</p><div class="stat-val">${formatMoney(sales)}</div></div>
+                <div class="stat-card stat-card-featured"><p>Total Sales</p><div class="stat-val">${formatMoney(sales)}</div><small>${formatMoney(summary.made)} sold · ${formatMoney(summary.pending)} pending (unavailable excluded)</small></div>
                 <div class="stat-card"><p>Inventory</p><div class="stat-val">${products.length}</div></div>
-                <div class="stat-card"><p>Total Orders</p><div class="stat-val">${orders.length}</div></div>
+                <div class="stat-card"><p>Total Orders</p><div class="stat-val">${uniqueOrders.length}</div></div>
                 <div class="stat-card"><p>Registered Users</p><div class="stat-val">${Number(stats.registeredUsers) || 0}</div></div>
                 <div class="stat-card"><p>Website Visitors</p><div class="stat-val">${Number(stats.websiteVisitors) || 0}</div><small>${Number(stats.totalViews) || 0} total view${Number(stats.totalViews) === 1 ? '' : 's'}</small></div>
             </div>`;
     } else if (tab === 'inventory') {
         content = `<h2 class="mb-20">Inventory Management</h2>
-            <div class="stats-grid inventory-stats">
-                <div class="stat-card"><p>Inventory</p><div class="stat-val">${products.length}</div></div>
-                <div class="stat-card"><p>Total Orders</p><div class="stat-val">${orders.length}</div></div>
-            </div>
             <section class="category-manager" aria-labelledby="category-manager-title">
                 <h3 id="category-manager-title">Product Categories</h3>
                 <form class="category-form" onsubmit="addCategory(event)">
@@ -796,7 +881,7 @@ function renderAdmin(tab = 'overview') {
             <div class="inventory-add-wrap">
                 <button type="button" class="btn" onclick="openProductModal()">+ Add Product</button>
             </div>
-            <div class="table-wrap"><table><thead><tr><th>ID</th><th>Photo</th><th>Product</th><th>Category</th><th>Price</th><th>Actions</th></tr></thead><tbody>${products.map(product => { const safeId = escapeHtml(String(product.id)); return `<tr><td>${safeId}</td><td><img class="inventory-thumb" src="${escapeHtml(product.image)}" alt=""></td><td>${escapeHtml(product.name)}</td><td>${escapeHtml(product.category)}</td><td>${formatMoney(product.price)}${hasBulk(product) ? `<br><small>${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}</td><td><div class="inventory-actions"><button class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button><button class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button></div></td></tr>`; }).join('')}</tbody></table></div>`;
+            <div class="table-wrap"><table><thead><tr><th>ID</th><th>Photo</th><th>Product</th><th>Category</th><th>Price</th><th>Actions</th></tr></thead><tbody>${products.map(product => { const safeId = escapeHtml(String(product.id)); return `<tr><td>${safeId}</td><td><img class="inventory-thumb" src="${escapeHtml(product.image)}" alt=""></td><td>${escapeHtml(product.name)}</td><td>${escapeHtml(product.category)}</td><td><span class="inventory-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</span>${hasBulk(product) ? `<br><small>${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}</td><td><div class="inventory-actions"><button class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button><button class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button></div></td></tr>`; }).join('')}</tbody></table></div>`;
     } else if (tab === 'contacts') {
         content = contactsMarkup(getMessages());
     } else if (tab === 'reports') {
@@ -835,7 +920,10 @@ function renderAdmin(tab = 'overview') {
     app.innerHTML = `<div class="admin-page">
         <div class="admin-header">
             <span class="admin-header-badge">Admin Dashboard</span>
-            <a href="#/profile" class="btn btn-outline btn-small">← Profile</a>
+            <a href="#/profile" class="blood-strike-back-btn" aria-label="Back to profile">
+                <svg class="blood-strike-back-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+                <span>Back</span>
+            </a>
         </div>
         <section>${content}</section>
         <nav class="admin-bottom-nav" aria-label="Admin sections">
@@ -889,7 +977,7 @@ function orderTrackingMarkup(orders) {
         }).join('');
         return `<tr><td>${escapeHtml(order.id)}</td><td>${escapeHtml(order.customer)}</td><td>${escapeHtml(order.email)}</td><td>${escapeHtml(order.address)}, ${escapeHtml(order.city)} ${escapeHtml(order.zip)}</td>
             <td>${items}<div class="order-item-bulk"><button type="button" class="btn btn-outline btn-small" onclick="markOrderItems('${escapeHtml(order.id)}', 'sold')">All sold</button> <button type="button" class="btn btn-outline btn-small" onclick="markOrderItems('${escapeHtml(order.id)}', 'unavailable')">All unavailable</button></div></td>
-            <td>${escapeHtml(order.date)}</td><td>${formatMoney(order.total)}</td></tr>`;
+            <td>${escapeHtml(order.date)}</td><td>${formatMoney(getOrderTotal(order))}</td></tr>`;
     }).join('');
     return `<h2 class="mb-20">Order Tracking</h2>
         <p class="form-hint mb-20">For each item, enter how many units were sold and how many were unavailable (they can add up to at most the quantity ordered). These numbers feed the monthly report.</p>
@@ -906,8 +994,8 @@ async function saveOrderItems(order, items) {
         const nextOrder = data?.order || { ...order, items, reportedAtMs };
         store.allOrders = store.allOrders.map(entry => entry.id === order.id ? nextOrder : entry);
     } catch (error) {
-        console.error(error);
-        alert('The order could not be updated. Check your connection and admin access.');
+        console.warn(error);
+        showToast('The order could not be updated. Check your connection and admin access.', 'error');
     }
     renderAdmin('orders');
 }
@@ -927,7 +1015,7 @@ async function setItemSplit(orderId, index, kind, value) {
     if (!Number.isFinite(amount) || amount < 0) amount = 0;
     const other = kind === 'sold' ? current.unavailable : current.sold;
     if (amount + other > quantity) {
-        alert(`Only ${quantity} ordered, so Sold and Unavailable can add up to at most ${quantity}.`);
+        showToast(`Only ${quantity} ordered, so Sold and Unavailable can add up to at most ${quantity}.`, 'error');
         renderAdmin('orders');
         return;
     }
@@ -1040,13 +1128,13 @@ async function sendContactMessage(event) {
             store.messages = [...store.messages, data.message];
         }
     } catch (error) {
-        console.error(error);
-        alert('Your message could not be sent. Please check your connection and try again.');
+        console.warn(error);
+        showToast('Your message could not be sent. Please check your connection and try again.', 'error');
         return;
     } finally {
         sendingMessage = false;
     }
-    alert('Message sent! We will get back to you soon.');
+    showToast('Message sent! We will get back to you soon.', 'success');
     location.hash = '#/home';
 }
 
@@ -1074,20 +1162,21 @@ async function setMessageRead(id, read) {
         });
         store.messages = store.messages.map(item => item.id === id ? (data?.message || { ...item, read: Boolean(read) }) : item);
     } catch (error) {
-        console.error(error);
-        alert('The message could not be updated. Check your connection and admin access.');
+        console.warn(error);
+        showToast('The message could not be updated. Check your connection and admin access.', 'error');
     }
     renderAdmin('contacts');
 }
 
 async function deleteMessage(id) {
-    if (!confirm('Delete this message?')) return;
+    if (!(await askConfirm('Delete this message?'))) return;
     try {
         await apiRequest(`/api/messages/${encodeURIComponent(id)}`, { method: 'DELETE' });
         store.messages = store.messages.filter(item => item.id !== id);
+        showToast('Message deleted.', 'success');
     } catch (error) {
-        console.error(error);
-        alert('The message could not be deleted. Check your connection and admin access.');
+        console.warn(error);
+        showToast('The message could not be deleted. Check your connection and admin access.', 'error');
     }
     renderAdmin('contacts');
 }
@@ -1165,7 +1254,7 @@ function readSelectedOptions() {
     const selects = [...document.querySelectorAll('.product-option select')];
     const missing = selects.filter(select => !select.value);
     if (missing.length) {
-        alert(`Please select ${missing.map(select => select.dataset.optionName.toLowerCase()).join(' and ')}.`);
+        showToast(`Please select ${missing.map(select => select.dataset.optionName.toLowerCase()).join(' and ')}.`, 'error');
         missing[0].focus();
         return null;
     }
@@ -1198,7 +1287,7 @@ function addProductQuantity(id) {
 function orderProductViaWhatsApp(productId) {
     if (!getCurrentUser()) {
         if (!authSettled) {
-            alert('Just a moment, still checking your login. Please try again.');
+            showToast('Just a moment, still checking your login. Please try again.');
         } else {
             requireLogin(location.hash || '#/home', 'Please log in or register to place an order.');
         }
@@ -1207,14 +1296,17 @@ function orderProductViaWhatsApp(productId) {
     const products = getProducts();
     const product = products.find(item => sameId(item.id, productId));
     if (!product) {
-        alert('This product is no longer available.');
+        showToast('This product is no longer available.', 'error');
         return;
     }
     const selected = readSelectedOptions();
     if (!selected) return;
     const quantity = Math.max(1, Number.parseInt(document.getElementById('product-qty')?.value, 10) || 1);
     const options = Object.entries(selected).map(([name, value]) => `${name}: ${value}`);
-    const unitPrice = hasBulk(product) && quantity >= Number(product.bulkMinQty) ? Number(product.bulkPrice) : Number(product.price);
+    const basePrice = baseUnitPrice(product);
+    const unitPrice = hasBulk(product) && quantity >= Number(product.bulkMinQty)
+        ? Math.min(basePrice, Number(product.bulkPrice))
+        : basePrice;
     const sku = product.sku || product.id;
     const message = [
         'Hello! I would like to order:',
@@ -1529,12 +1621,12 @@ async function updateProfile() {
     try {
         await apiRequest('/api/profile', { method: 'PATCH', body: { name } });
     } catch (error) {
-        console.error(error);
-        alert('Profile could not be updated. Check your connection and try again.');
+        console.warn(error);
+        showToast('Profile could not be updated. Check your connection and try again.', 'error');
         return;
     }
     user.name = name;
-    alert('Profile updated.');
+    showToast('Profile updated.', 'success');
     renderDashboard('profile');
 }
 
@@ -1566,8 +1658,8 @@ async function saveCategories(categories, sizeCategories = getSizeCategories(), 
         store.colorCategories = Array.isArray(data.colorCategories) ? data.colorCategories : [];
         return true;
     } catch (error) {
-        console.error(error);
-        alert('Categories could not be saved. Check your connection and admin access.');
+        console.warn(error);
+        showToast(error.message || 'Categories could not be saved. Check your connection and admin access.', 'error');
         return false;
     }
 }
@@ -1578,13 +1670,16 @@ async function addCategory(event) {
     const name = input.value.trim();
     const categories = getCategories();
     if (categories.some(category => category.toLowerCase() === name.toLowerCase())) {
-        alert('That category already exists.');
+        showToast('That category already exists.', 'error');
         return;
     }
     categories.push(name);
     const sizeCategories = document.getElementById('new-category-size').checked ? [...getSizeCategories(), name] : getSizeCategories();
     const colorCategories = document.getElementById('new-category-color').checked ? [...getColorCategories(), name] : getColorCategories();
-    if (await saveCategories(categories, sizeCategories, colorCategories)) renderAdmin('inventory');
+    if (await saveCategories(categories, sizeCategories, colorCategories)) {
+        showToast('Category added.', 'success');
+        renderAdmin('inventory');
+    }
 }
 
 async function toggleCategoryOption(button) {
@@ -1595,35 +1690,47 @@ async function toggleCategoryOption(button) {
     if (await saveCategories(getCategories(), sizeCategories, colorCategories)) renderAdmin('inventory');
 }
 
-// Colors and sizes are asked for separately, depending on the product's category.
+// Colors and sizes are optional for every product.
 function buildProductOptions(category, colorsText, sizesText) {
     const options = {};
-    if (categoryNeedsColor(category)) {
-        const colors = splitList(colorsText);
-        if (!colors.length) return { error: 'Enter at least one color for this category.' };
-        options.Color = colors;
-    }
-    if (categoryNeedsSize(category)) {
-        const sizes = splitList(sizesText);
-        if (!sizes.length) return { error: 'Enter at least one size for this category.' };
-        options.Size = sizes;
-    }
+    const colors = splitList(colorsText);
+    if (colors.length) options.Color = colors;
+    const sizes = splitList(sizesText);
+    if (sizes.length) options.Size = sizes;
     return { options };
 }
 
 async function removeCategory(button) {
     const category = button.dataset.category;
     if (getProducts().some(product => product.category === category)) {
-        alert('This category is assigned to products. Reassign those products before removing it.');
+        showToast('This category is assigned to products. Reassign those products before removing it.', 'error');
         return;
     }
     const categories = getSavedCategories().filter(item => item !== category);
-    if (await saveCategories(categories)) renderAdmin('inventory');
+    if (await saveCategories(categories)) {
+        showToast('Category removed.', 'success');
+        renderAdmin('inventory');
+    }
 }
 
 const MAX_PHOTOS = 7;
-const PHOTO_BUDGET = 115000; // characters per photo, so 7 photos always fit in one 1 MB Firestore document
+const MAX_RAW_PHOTO_BYTES = 20 * 1024 * 1024;
+const PHOTO_BUDGET = 115000; // characters per photo, so 7 photos always fit cleanly
 let modalPhotos = [];
+let pendingPhotoPromise = Promise.resolve();
+
+function setProductNotice(message = '') {
+    const el = document.getElementById('product-form-notice');
+    if (!el) return;
+    if (!message) {
+        el.textContent = '';
+        el.hidden = true;
+        return;
+    }
+    el.textContent = message;
+    el.hidden = false;
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
 
 function renderPhotoList() {
     const list = document.getElementById('product-photo-list');
@@ -1648,58 +1755,89 @@ function makeMainPhoto(index) {
 
 async function addProductPhotos(event) {
     const input = event.target;
-    const files = [...input.files];
+    const files = [...(input.files || [])];
     input.value = '';
     if (!files.length) return;
+    setProductNotice('');
     const room = MAX_PHOTOS - modalPhotos.length;
     if (room <= 0) {
-        alert('You can add up to 7 photos per product.');
+        const msg = 'You can add up to 7 photos per product.';
+        setProductNotice(msg);
+        showToast(msg, 'error');
         return;
     }
     if (files.length > room) {
-        alert(`Only ${room} more photo${room === 1 ? '' : 's'} can be added (7 maximum). The first ${room} were kept.`);
+        showToast(`Only ${room} more photo${room === 1 ? '' : 's'} can be added (7 maximum). The first ${room} were kept.`);
     }
-    for (const file of files.slice(0, room)) {
-        if (!file.type.startsWith('image/')) {
-            alert(`"${file.name}" is not an image file.`);
-            continue;
-        }
-        if (file.size > 2 * 1024 * 1024) {
-            alert(`"${file.name}" is larger than 2 MB.`);
-            continue;
-        }
-        try {
-            const photo = await compressImage(file);
-            if (modalPhotos.length < MAX_PHOTOS) modalPhotos.push(photo);
-            renderPhotoList();
-        } catch (error) {
-            alert(error.message);
-        }
+    const saveBtn = document.getElementById('product-save-button');
+    const prevLabel = saveBtn ? saveBtn.textContent : '';
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Processing photo…';
     }
+    const task = (async () => {
+        for (const file of files.slice(0, room)) {
+            if (!isImageFile(file)) {
+                const msg = `"${file.name}" is not an image file.`;
+                setProductNotice(msg);
+                showToast(msg, 'error');
+                continue;
+            }
+            if (file.size > MAX_RAW_PHOTO_BYTES) {
+                const msg = `"${file.name}" is larger than 20 MB.`;
+                setProductNotice(msg);
+                showToast(msg, 'error');
+                continue;
+            }
+            try {
+                const photo = await compressImage(file);
+                if (modalPhotos.length < MAX_PHOTOS) modalPhotos.push(photo);
+                renderPhotoList();
+            } catch (error) {
+                setProductNotice(error.message);
+                showToast(error.message, 'error');
+            }
+        }
+    })().finally(() => {
+        if (saveBtn && !savingProduct) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = prevLabel || 'Save Product';
+        }
+    });
+    pendingPhotoPromise = pendingPhotoPromise.then(() => task, () => task);
+    await task;
 }
 
 function syncVariantFields() {
-    const category = document.getElementById('p-category').value;
-    document.getElementById('color-field').hidden = !categoryNeedsColor(category);
-    document.getElementById('size-field').hidden = !categoryNeedsSize(category);
+    const colorField = document.getElementById('color-field');
+    const sizeField = document.getElementById('size-field');
+    if (colorField) colorField.hidden = false;
+    if (sizeField) sizeField.hidden = false;
 }
 
 function openProductModal(productId = null) {
+    const modal = document.getElementById('product-modal');
     const form = document.getElementById('product-form');
+    if (!modal || !form) return;
     const product = productId === null
         ? null
         : getProducts().find(item => sameId(item.id, productId));
     if (productId !== null && !product) {
-        alert('Product could not be found.');
+        showToast('Product could not be found.', 'error');
         return;
     }
     form.reset();
+    setProductNotice('');
     document.getElementById('p-id').value = product ? String(product.id) : '';
     document.getElementById('p-name').value = product?.name || '';
     document.getElementById('p-price').value = product?.price ?? '';
+    document.getElementById('p-promo-price').value = product?.promoPrice ?? '';
     document.getElementById('p-bulk-price').value = product?.bulkPrice ?? '';
     document.getElementById('p-bulk-qty').value = product?.bulkMinQty ?? '';
     const categorySelect = document.getElementById('p-category');
+    const availableCategories = getCategories();
+    const categoryList = availableCategories.length ? availableCategories : ['General'];
+    categorySelect.innerHTML = categoryList.map(category => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join('');
     const wantedCategory = product?.category || 'Electronics';
     categorySelect.value = [...categorySelect.options].some(option => option.value === wantedCategory)
         ? wantedCategory
@@ -1709,14 +1847,18 @@ function openProductModal(productId = null) {
     document.getElementById('p-sizes').value = (product?.options?.Size || []).join(', ');
     syncVariantFields();
     document.getElementById('product-modal-title').textContent = product ? 'Edit Product' : 'Add New Product';
-    document.getElementById('product-save-button').textContent = product ? 'Save Changes' : 'Save Product';
+    const saveBtn = document.getElementById('product-save-button');
+    saveBtn.disabled = false;
+    saveBtn.textContent = product ? 'Save Changes' : 'Save Product';
     modalPhotos = product ? getProductPhotos(product) : [];
     renderPhotoList();
-    document.getElementById('product-modal').hidden = false;
+    modal.hidden = false;
 }
 
 function closeProductModal() {
-    document.getElementById('product-modal').hidden = true;
+    const modal = document.getElementById('product-modal');
+    if (modal) modal.hidden = true;
+    setProductNotice('');
 }
 
 function loadImage(src) {
@@ -1772,54 +1914,84 @@ let savingProduct = false;
 async function saveNewProduct(event) {
     event.preventDefault();
     if (savingProduct) return;
+    setProductNotice('');
+    await pendingPhotoPromise;
     if (!modalPhotos.length) {
-        alert('Add at least one product photo before saving.');
+        const msg = 'Add at least one product photo before saving.';
+        setProductNotice(msg);
+        showToast(msg, 'error');
         return;
     }
     const products = getProducts();
     const productId = document.getElementById('p-id').value;
     const existingIndex = products.findIndex(product => String(product.id) === productId);
-    const category = document.getElementById('p-category').value;
+    const category = document.getElementById('p-category').value || 'General';
+    const promoPriceText = document.getElementById('p-promo-price').value.trim();
     const bulkPriceText = document.getElementById('p-bulk-price').value.trim();
     const bulkQtyText = document.getElementById('p-bulk-qty').value.trim();
     const normalPrice = Number(document.getElementById('p-price').value);
+    let promoPrice = null;
+    if (promoPriceText !== '') {
+        const parsedPromo = Number(promoPriceText);
+        if (!Number.isFinite(parsedPromo) || !(parsedPromo >= 0) || !(parsedPromo < normalPrice)) {
+            const msg = 'The promotion amount must be lower than the actual price.';
+            setProductNotice(msg);
+            showToast(msg, 'error');
+            return;
+        }
+        promoPrice = parsedPromo;
+    }
     let bulk = null;
     if (bulkPriceText || bulkQtyText) {
         const bulkPrice = Number(bulkPriceText);
         const bulkMinQty = Number(bulkQtyText);
         if (!bulkPriceText || !bulkQtyText) {
-            alert('Enter both the bulk price and the quantity it applies from, or leave both empty.');
+            const msg = 'Enter both the bulk price and the quantity it applies from, or leave both empty.';
+            setProductNotice(msg);
+            showToast(msg, 'error');
             return;
         }
         if (!(bulkPrice >= 0) || !(bulkPrice < normalPrice)) {
-            alert('The bulk price must be lower than the normal price.');
+            const msg = 'The bulk price must be lower than the normal price.';
+            setProductNotice(msg);
+            showToast(msg, 'error');
             return;
         }
         if (!Number.isInteger(bulkMinQty) || bulkMinQty < 2) {
-            alert('The bulk quantity must be a whole number of 2 or more.');
+            const msg = 'The bulk quantity must be a whole number of 2 or more.';
+            setProductNotice(msg);
+            showToast(msg, 'error');
             return;
         }
         bulk = { bulkPrice, bulkMinQty };
     }
+    const built = buildProductOptions(category, document.getElementById('p-colors').value, document.getElementById('p-sizes').value);
+    if (built.error) {
+        setProductNotice(built.error);
+        showToast(built.error, 'error');
+        return;
+    }
     savingProduct = true;
+    const saveBtn = document.getElementById('product-save-button');
+    const originalBtnText = saveBtn ? saveBtn.textContent : 'Save Product';
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+    }
     try {
-        // Older photos saved at a larger size are shrunk so all photos fit in one document.
+        // Older photos saved at a larger size are shrunk so all photos fit cleanly.
         const photos = await Promise.all(modalPhotos.map(src => src.length > PHOTO_BUDGET ? compressImage(src) : src));
         const product = {
             id: existingIndex >= 0 ? products[existingIndex].id : Date.now(),
             name: document.getElementById('p-name').value.trim(),
-            price: Number(document.getElementById('p-price').value),
+            price: normalPrice,
             image: photos[0],
             gallery: photos.slice(1),
             category,
             description: document.getElementById('p-desc').value.trim()
         };
+        if (promoPrice !== null) product.promoPrice = promoPrice;
         if (bulk) Object.assign(product, bulk);
-        const built = buildProductOptions(category, document.getElementById('p-colors').value, document.getElementById('p-sizes').value);
-        if (built.error) {
-            alert(built.error);
-            return;
-        }
         if (Object.keys(built.options).length) product.options = built.options;
         const saved = await apiRequest(`/api/admin/products/${encodeURIComponent(String(product.id))}`, {
             method: 'PUT',
@@ -1832,26 +2004,32 @@ async function saveNewProduct(event) {
             store.products = [...store.products, nextProduct];
         }
     } catch (error) {
-        console.error(error);
-        alert(error.code
-            ? 'Product could not be saved. Check your connection and that you are signed in as an admin.'
-            : error.message);
+        console.warn('[Save Product Error]', error);
+        const msg = error.message || 'Product could not be saved. Check your connection and that you are signed in as an admin.';
+        setProductNotice(msg);
+        showToast(msg, 'error');
         return;
     } finally {
         savingProduct = false;
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = originalBtnText;
+        }
     }
     closeProductModal();
+    showToast(existingIndex >= 0 ? 'Product updated.' : 'Product added!', 'success');
     renderAdmin('inventory');
 }
 
 async function deleteProduct(id) {
-    if (!confirm('Delete this product?')) return;
+    if (!(await askConfirm('Delete this product?'))) return;
     try {
         await apiRequest(`/api/admin/products/${encodeURIComponent(String(id))}`, { method: 'DELETE' });
         store.products = store.products.filter(item => !sameId(item.id, id));
+        showToast('Product deleted.', 'success');
     } catch (error) {
-        console.error(error);
-        alert('Product could not be deleted. Check your connection and admin access.');
+        console.warn(error);
+        showToast(error.message || 'Product could not be deleted. Check your connection and admin access.', 'error');
         return;
     }
     renderAdmin('inventory');
@@ -1864,6 +2042,7 @@ document.getElementById('primary-navigation')?.addEventListener('click', event =
 document.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
         toggleMenu(true);
+        closeProductModal();
     }
 });
 // Re-draw the current page when shared data changes on another device,

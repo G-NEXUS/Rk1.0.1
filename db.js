@@ -12,6 +12,7 @@ const ProductSchema = new mongoose.Schema(
     id: { type: mongoose.Schema.Types.Mixed, index: true },
     name: String,
     price: Number,
+    promoPrice: Number,
     bulkPrice: Number,
     bulkMinQty: Number,
     image: String,
@@ -95,17 +96,32 @@ const PasswordResetSchema = new mongoose.Schema(
   { strict: false, versionKey: false, collection: 'passwordResets' }
 );
 
+const DidYouKnowSchema = new mongoose.Schema(
+  {
+    id: { type: String, unique: true, index: true },
+    title: String,
+    description: String,
+    image: String,
+    badge: { type: String, default: 'DID YOU KNOW' },
+    link: String,
+    createdAtMs: Number,
+  },
+  { strict: false, versionKey: false, collection: 'didYouKnow' }
+);
+
 const Product = mongoose.models.Product || mongoose.model('Product', ProductSchema);
 const Meta = mongoose.models.Meta || mongoose.model('Meta', MetaSchema);
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 const Order = mongoose.models.Order || mongoose.model('Order', OrderSchema);
 const Message = mongoose.models.Message || mongoose.model('Message', MessageSchema);
 const PasswordReset = mongoose.models.PasswordReset || mongoose.model('PasswordReset', PasswordResetSchema);
+const DidYouKnow = mongoose.models.DidYouKnow || mongoose.model('DidYouKnow', DidYouKnowSchema);
 
 // Local fallback used only when MONGODB_URI is not configured or unreachable
 function loadLocalStore() {
   const empty = {
     products: [],
+    deletedProductIds: [],
     metaCategories: {
       list: [],
       sizeCategories: [],
@@ -115,6 +131,7 @@ function loadLocalStore() {
     orders: [],
     messages: [],
     passwordResets: [],
+    didYouKnow: [],
     analytics: {
       totalViews: 0,
       visitorIds: [],
@@ -275,6 +292,9 @@ function normalizeProduct(doc) {
     category: obj.category ?? '',
     description: obj.description ?? '',
   };
+  if (obj.promoPrice !== undefined && obj.promoPrice !== null && obj.promoPrice !== '') {
+    normalized.promoPrice = Number(obj.promoPrice);
+  }
   if (obj.bulkPrice !== undefined && obj.bulkPrice !== null && obj.bulkPrice !== '') {
     normalized.bulkPrice = Number(obj.bulkPrice);
   }
@@ -301,11 +321,12 @@ function sortProducts(list) {
 function normalizeUser(doc) {
   if (!doc) return null;
   const obj = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
+  const adminEmail = String(process.env.ADMIN_EMAIL || 'choolwechingobe2@gmail.com').trim().toLowerCase();
   return {
     uid: obj.uid || String(obj._id),
     name: obj.name || '',
     email: obj.email || '',
-    isAdmin: obj.isAdmin === true,
+    isAdmin: obj.isAdmin === true || (Boolean(adminEmail) && String(obj.email || '').toLowerCase() === adminEmail),
     passwordHash: obj.passwordHash || '',
   };
 }
@@ -367,6 +388,9 @@ async function saveProduct(rawId, payload) {
     } else {
       memoryStore.products.push({ ...cleanPayload });
     }
+    if (Array.isArray(memoryStore.deletedProductIds)) {
+      memoryStore.deletedProductIds = memoryStore.deletedProductIds.filter((id) => String(id) !== String(rawId));
+    }
     persistLocalStore();
     return normalizeProduct(cleanPayload);
   }
@@ -378,6 +402,7 @@ async function saveProduct(rawId, payload) {
     // Preserve original id type if updating an existing document
     updateDoc.id = existing.id !== undefined && existing.id !== null ? existing.id : cleanPayload.id;
     const unsetFields = {};
+    if (updateDoc.promoPrice === undefined) unsetFields.promoPrice = '';
     if (updateDoc.bulkPrice === undefined) unsetFields.bulkPrice = '';
     if (updateDoc.bulkMinQty === undefined) unsetFields.bulkMinQty = '';
     if (updateDoc.options === undefined) unsetFields.options = '';
@@ -400,6 +425,27 @@ async function deleteProduct(rawId) {
   }
   const result = await Product.deleteOne(productFilter(rawId));
   return result.deletedCount > 0;
+}
+
+function listDeletedProductIds() {
+  return Array.isArray(memoryStore.deletedProductIds) ? [...memoryStore.deletedProductIds] : [];
+}
+
+function markProductDeleted(rawId) {
+  const key = String(rawId);
+  if (!Array.isArray(memoryStore.deletedProductIds)) memoryStore.deletedProductIds = [];
+  if (!memoryStore.deletedProductIds.includes(key)) {
+    memoryStore.deletedProductIds.push(key);
+    persistLocalStore();
+  }
+}
+
+function unmarkProductDeleted(rawId) {
+  const key = String(rawId);
+  if (!Array.isArray(memoryStore.deletedProductIds)) return;
+  const before = memoryStore.deletedProductIds.length;
+  memoryStore.deletedProductIds = memoryStore.deletedProductIds.filter((id) => String(id) !== key);
+  if (memoryStore.deletedProductIds.length < before) persistLocalStore();
 }
 
 // ---------- Categories Meta ----------
@@ -778,6 +824,62 @@ async function getAdminStats({ extraUsers = [] } = {}) {
   };
 }
 
+// ---------- Did You Know Cards ----------
+async function listDidYouKnow() {
+  if (!isMongoReady()) {
+    return Array.isArray(memoryStore.didYouKnow) ? [...memoryStore.didYouKnow] : [];
+  }
+  const docs = await DidYouKnow.find({}).sort({ createdAtMs: 1 }).lean();
+  return docs.map(doc => {
+    const { _id, __v, ...rest } = doc;
+    return { ...rest, id: doc.id || String(_id) };
+  });
+}
+
+async function saveDidYouKnow(id, payload) {
+  const cleanId = String(id || `DYK-${Date.now()}`);
+  const record = {
+    id: cleanId,
+    title: String(payload?.title || '').trim(),
+    description: String(payload?.description || '').trim(),
+    image: String(payload?.image || '').trim(),
+    badge: String(payload?.badge || 'DID YOU KNOW').trim(),
+    link: String(payload?.link || '').trim(),
+    createdAtMs: Number(payload?.createdAtMs) || Date.now(),
+  };
+  if (!isMongoReady()) {
+    if (!Array.isArray(memoryStore.didYouKnow)) memoryStore.didYouKnow = [];
+    const idx = memoryStore.didYouKnow.findIndex(item => String(item.id) === cleanId);
+    if (idx >= 0) {
+      memoryStore.didYouKnow[idx] = { ...memoryStore.didYouKnow[idx], ...record };
+    } else {
+      memoryStore.didYouKnow.push(record);
+    }
+    persistLocalStore();
+    return record;
+  }
+  const updated = await DidYouKnow.findOneAndUpdate(
+    { id: cleanId },
+    { $set: record },
+    { upsert: true, new: true }
+  ).lean();
+  const { _id, __v, ...rest } = updated;
+  return { ...rest, id: updated.id || String(_id) };
+}
+
+async function deleteDidYouKnow(id) {
+  const cleanId = String(id);
+  if (!isMongoReady()) {
+    if (!Array.isArray(memoryStore.didYouKnow)) memoryStore.didYouKnow = [];
+    const before = memoryStore.didYouKnow.length;
+    memoryStore.didYouKnow = memoryStore.didYouKnow.filter(item => String(item.id) !== cleanId);
+    if (memoryStore.didYouKnow.length < before) persistLocalStore();
+    return memoryStore.didYouKnow.length < before;
+  }
+  const result = await DidYouKnow.deleteOne({ id: cleanId });
+  return result.deletedCount > 0;
+}
+
 module.exports = {
   connectDB,
   isMongoReady,
@@ -804,4 +906,10 @@ module.exports = {
   recordKnownUsers,
   recordSiteVisit,
   getAdminStats,
+  listDidYouKnow,
+  saveDidYouKnow,
+  deleteDidYouKnow,
+  listDeletedProductIds,
+  markProductDeleted,
+  unmarkProductDeleted,
 };
