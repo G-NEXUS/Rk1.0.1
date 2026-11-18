@@ -34,7 +34,7 @@ const BLOCKED_FILES = new Set([
   '/README.md',
 ]);
 
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 function useUpstreamProxy() {
   return !db.isMongoReady() && Boolean(UPSTREAM_API_URL);
@@ -292,7 +292,7 @@ app.use('/api', async (req, res, next) => {
     }
 
     // Resilient product save (PUT /api/admin/products/:id or /api/products/:id)
-    const productWriteMatch = req.path.match(/^\/(?:admin\/)?products\/([^/]+)$/);
+    const productWriteMatch = req.path.match(/^\/(?:admin\/)?products\/([^/]+)\/?$/);
     if (productWriteMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
       const productId = decodeURIComponent(productWriteMatch[1]);
       const headers = {};
@@ -867,6 +867,12 @@ app.use('/api', (req, res) => {
 // API error handler
 app.use((err, req, res, next) => {
   if (req.path.startsWith('/api')) {
+    if (err?.type === 'entity.too.large' || err?.status === 413) {
+      return res.status(413).json({ error: 'Product photos are too large to upload at once. Try fewer or smaller photos.' });
+    }
+    if (err?.status === 400 && err?.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'Invalid request payload.' });
+    }
     console.error('[API Error]', err);
     return res.status(500).json({ error: 'Internal server error.' });
   }

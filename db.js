@@ -266,8 +266,6 @@ function productFilter(rawId) {
   }
   if (isObjectIdHex(str)) {
     clauses.push({ _id: new mongoose.Types.ObjectId(str) });
-  } else {
-    clauses.push({ _id: str });
   }
   return { $or: clauses };
 }
@@ -374,11 +372,33 @@ async function listProducts() {
 }
 
 async function saveProduct(rawId, payload) {
-  const cleanPayload = { ...payload };
-  delete cleanPayload._id;
-  delete cleanPayload.__v;
+  const cleanPayload = {};
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (key === '_id' || key === '__v' || value === undefined) continue;
+    cleanPayload[key] = value;
+  }
   if (cleanPayload.id === undefined || cleanPayload.id === null || cleanPayload.id === '') {
-    cleanPayload.id = rawId;
+    cleanPayload.id = /^\d+$/.test(String(rawId)) && Number.isSafeInteger(Number(rawId))
+      ? Number(rawId)
+      : String(rawId);
+  }
+  cleanPayload.name = String(cleanPayload.name ?? '').trim();
+  cleanPayload.price = Number.isFinite(Number(cleanPayload.price)) ? Number(cleanPayload.price) : 0;
+  cleanPayload.category = String(cleanPayload.category ?? '').trim();
+  cleanPayload.description = String(cleanPayload.description ?? '').trim();
+  cleanPayload.image = String(cleanPayload.image ?? '');
+  cleanPayload.gallery = Array.isArray(cleanPayload.gallery) ? cleanPayload.gallery.filter(Boolean) : [];
+
+  for (const optNumField of ['promoPrice', 'bulkPrice', 'bulkMinQty']) {
+    const val = cleanPayload[optNumField];
+    if (val === undefined || val === null || val === '' || !Number.isFinite(Number(val))) {
+      delete cleanPayload[optNumField];
+    } else {
+      cleanPayload[optNumField] = Number(val);
+    }
+  }
+  if (!cleanPayload.options || typeof cleanPayload.options !== 'object' || !Object.keys(cleanPayload.options).length) {
+    delete cleanPayload.options;
   }
 
   if (!isMongoReady()) {
@@ -402,10 +422,12 @@ async function saveProduct(rawId, payload) {
     // Preserve original id type if updating an existing document
     updateDoc.id = existing.id !== undefined && existing.id !== null ? existing.id : cleanPayload.id;
     const unsetFields = {};
-    if (updateDoc.promoPrice === undefined) unsetFields.promoPrice = '';
-    if (updateDoc.bulkPrice === undefined) unsetFields.bulkPrice = '';
-    if (updateDoc.bulkMinQty === undefined) unsetFields.bulkMinQty = '';
-    if (updateDoc.options === undefined) unsetFields.options = '';
+    for (const optField of ['promoPrice', 'bulkPrice', 'bulkMinQty', 'options']) {
+      if (updateDoc[optField] === undefined) {
+        delete updateDoc[optField];
+        unsetFields[optField] = '';
+      }
+    }
     const updateOp = { $set: updateDoc };
     if (Object.keys(unsetFields).length) updateOp.$unset = unsetFields;
     const updated = await Product.findByIdAndUpdate(existing._id, updateOp, { new: true }).lean();
