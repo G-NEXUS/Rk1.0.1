@@ -196,13 +196,26 @@ async function loadStoreData({ silent = false } = {}) {
         } catch (error) {
             attempts--;
             if (attempts > 0) {
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                await new Promise(resolve => setTimeout(resolve, 2000));
             } else {
                 console.warn('Could not load storefront data:', error);
-                if (!silent) store.loadError = true;
+                if (!silent) {
+                    store.loadError = true;
+                    if (appReady && typeof refreshView === 'function') refreshView();
+                }
             }
         }
     }
+}
+
+async function retryLoadStore(button) {
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Loading…';
+    }
+    store.loadError = false;
+    await loadStoreData({ silent: false });
+    if (typeof renderPage === 'function') renderPage();
 }
 
 async function loadUserCollections(user) {
@@ -585,7 +598,11 @@ function renderHome() {
     app.innerHTML = `${heroMarkup()}
     <section class="shop-section">
         <h2 class="section-title">Our Products</h2>
-        ${products.length ? productSectionsMarkup(products) : `<p>${store.loadError ? 'Products could not be loaded right now. Please check your connection and refresh the page.' : 'No products available yet.'}</p>`}
+        ${products.length
+            ? productSectionsMarkup(products)
+            : (store.loadError
+                ? '<div class="empty-state"><p>Products could not be loaded right now. Please check your connection or database configuration and try again.</p><button type="button" class="btn mt-20" onclick="retryLoadStore(this)">Retry Loading Products</button></div>'
+                : '<p>No products available yet.</p>')}
     </section>`;
 }
 
@@ -822,10 +839,9 @@ function renderDashboard(tab = 'profile') {
                     <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>
                 </div>
                 <h1>Your Account</h1>
-                <p class="profile-guest-sub">Log in or create an account to place orders, view your order history, and manage your profile.</p>
+                <p class="profile-guest-sub">Sign in or create an account to place orders, view your order history, and manage your profile.</p>
                 <div class="profile-auth-actions">
-                    <a href="#/login" class="btn btn-full">Login</a>
-                    <a href="#/register" class="btn btn-outline btn-full">Register</a>
+                    <a href="#/login" class="btn btn-full">Sign In / Sign Up</a>
                 </div>
             </div>
             ${profileQuickLinksMarkup()}
@@ -1024,7 +1040,7 @@ function renderAdmin(tab = 'overview') {
                             </div>
                             <div class="category-directory-controls">
                                 ${[['size', 'Size', categoryNeedsSize(category)], ['color', 'Color', categoryNeedsColor(category)]].map(([option, label, on]) => `<button type="button" class="category-toggle${on ? ' is-on' : ''}" aria-pressed="${on}" aria-label="${label} option for ${safeCat}: ${on ? 'on' : 'off'}" data-category="${safeCat}" data-option="${option}" onclick="toggleCategoryOption(this)">${label}: ${on ? 'On' : 'Off'}</button>`).join('')}
-                                <button type="button" class="remove-btn" aria-label="Remove ${safeCat} category" data-category="${safeCat}" onclick="removeCategory(this)">Remove</button>
+                                <button type="button" class="remove-btn" aria-label="Delete ${safeCat} category" data-category="${safeCat}" onclick="removeCategory(this)">Delete Category</button>
                             </div>
                         </div>
                         <div class="subcategory-section">
@@ -2042,17 +2058,43 @@ function buildProductOptions(category, colorsText, sizesText) {
 }
 
 async function removeCategory(button) {
-    const category = button.dataset.category;
-    if (getProducts().some(product => product.category === category)) {
-        showToast('This category is assigned to products. Reassign those products before removing it.', 'error');
-        return;
+    const category = button.dataset.category || '';
+    if (!category) return;
+    const affectedProducts = getProducts().filter(product => product.category === category);
+    const confirmMessage = affectedProducts.length
+        ? `Delete category "${category}"? ${affectedProducts.length} ${affectedProducts.length === 1 ? 'product' : 'products'} in this category will become uncategorized.`
+        : `Delete category "${category}"?`;
+    if (!(await askConfirm(confirmMessage))) return;
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Deleting…';
     }
-    const categories = getSavedCategories().filter(item => item !== category);
-    const subMap = { ...getSubcategoriesMap() };
-    delete subMap[category];
-    if (await saveCategories(categories, getSizeCategories(), getColorCategories(), subMap)) {
-        showToast('Category removed.', 'success');
-        renderAdmin(lastAdminTab === 'categories' ? 'categories' : 'inventory');
+
+    try {
+        for (const prod of affectedProducts) {
+            const updatedBody = { ...prod, category: '', subcategory: '' };
+            const res = await apiRequest(`/api/admin/products/${encodeURIComponent(String(prod.id))}`, {
+                method: 'PUT',
+                body: updatedBody
+            });
+            const savedProd = res?.product || updatedBody;
+            store.products = store.products.map(item => (sameId(item.id, prod.id) ? savedProd : item));
+        }
+        const categories = getCategories().filter(item => item !== category);
+        const subMap = { ...getSubcategoriesMap() };
+        delete subMap[category];
+        if (await saveCategories(categories, getSizeCategories(), getColorCategories(), subMap)) {
+            showToast(`Category "${category}" deleted.`, 'success');
+            renderAdmin(lastAdminTab === 'categories' ? 'categories' : 'inventory');
+            return;
+        }
+    } catch (error) {
+        showToast(error.message || 'Could not delete category right now.', 'error');
+    }
+    if (button) {
+        button.disabled = false;
+        button.textContent = 'Delete Category';
     }
 }
 

@@ -273,12 +273,21 @@ async function connectDB() {
 }
 
 let connectPromise = null;
+let lastConnectAttemptMs = 0;
 
-function ensureDBConnected() {
-  if (isMongoReady()) return Promise.resolve(true);
-  if (!connectPromise) {
-    connectPromise = connectDB().catch(() => false);
+async function ensureDBConnected() {
+  if (isMongoReady()) return true;
+  if (connectPromise) return connectPromise;
+  const now = Date.now();
+  if (lastConnectAttemptMs && (now - lastConnectAttemptMs) < 5000) {
+    return false;
   }
+  lastConnectAttemptMs = now;
+  connectPromise = connectDB()
+    .catch(() => false)
+    .finally(() => {
+      connectPromise = null;
+    });
   return connectPromise;
 }
 

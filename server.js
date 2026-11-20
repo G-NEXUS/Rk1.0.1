@@ -20,7 +20,7 @@ const RAW_UPSTREAM = process.env.UPSTREAM_API_URL !== undefined
 const UPSTREAM_API_URL = RAW_UPSTREAM && RAW_UPSTREAM.toLowerCase() !== 'none'
   ? RAW_UPSTREAM.replace(/\/+$/, '')
   : '';
-const UPSTREAM_TIMEOUT_MS = 45000;
+const UPSTREAM_TIMEOUT_MS = process.env.VERCEL ? 18000 : 45000;
 
 const DEFAULT_ADMIN_EMAIL = 'choolwechingobe2@gmail.com';
 const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || DEFAULT_ADMIN_EMAIL).trim().toLowerCase();
@@ -329,7 +329,15 @@ app.get('/api/products/:id/photo/:index', async (req, res, next) => {
   }
 });
 
-// ---------- Auth Provider Discovery & Google Sign-In ----------
+// ---------- Health & Auth Provider Discovery ----------
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    dbConnected: db.isMongoReady(),
+    mode: db.isMongoReady() ? 'mongodb' : (useUpstreamProxy() ? 'upstream' : 'local'),
+  });
+});
+
 app.get('/api/auth/providers', (req, res) => {
   res.json({
     googleEnabled: Boolean(GOOGLE_CLIENT_ID),
@@ -534,13 +542,19 @@ app.use('/api', async (req, res, next) => {
           subcategories: mergedCats.subcategories || {},
         });
       } catch (err) {
-        console.log('[Storefront Sync] Upstream unavailable, using local fallback:', err.message);
+        console.log('[Storefront Sync] Upstream unavailable, checking local fallback:', err.message);
       }
 
       const [localProducts, localMeta] = await Promise.all([
         db.listProducts(),
         db.getCategoriesMeta(),
       ]);
+      if (!localProducts.length && !localMeta.list.length) {
+        return res.status(503).json({
+          code: 'store/backend-unavailable',
+          error: 'Could not reach database or upstream store API. Check MONGODB_URI and Atlas Network Access (0.0.0.0/0).',
+        });
+      }
       return res.json({
         products: media.registerProductsList(localProducts),
         categories: localMeta.list,
@@ -557,9 +571,15 @@ app.use('/api', async (req, res, next) => {
         const products = media.registerProductsList(await mergeUpstreamWithLocalProducts(upProducts));
         return res.json({ products });
       } catch (err) {
-        console.log('[Products Sync] Upstream unavailable, using local fallback:', err.message);
+        console.log('[Products Sync] Upstream unavailable, checking local fallback:', err.message);
       }
       const localProducts = await db.listProducts();
+      if (!localProducts.length) {
+        return res.status(503).json({
+          code: 'store/backend-unavailable',
+          error: 'Could not reach database or upstream store API.',
+        });
+      }
       return res.json({ products: media.registerProductsList(localProducts) });
     }
 
@@ -777,10 +797,7 @@ function requireAdmin(req, res, next) {
 
 app.use('/api', attachUser);
 
-// ---------- Health & Public Storefront Data ----------
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true });
-});
+// ---------- Public Storefront Data ----------
 
 app.get('/api/store', async (req, res, next) => {
   try {
@@ -1196,6 +1213,8 @@ app.use((err, req, res, next) => {
 });
 
 // ---------- Static Storefront Serving ----------
+const STATIC_ASSET_EXT_RE = /\.(?:css|js|mjs|map|json|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|eot)$/i;
+
 app.use((req, res, next) => {
   const reqPath = req.path;
   if (reqPath.startsWith('/.') || BLOCKED_FILES.has(reqPath)) {
@@ -1204,9 +1223,23 @@ app.use((req, res, next) => {
   return next();
 });
 
+app.get('/styles.css', (req, res) => {
+  res.type('text/css; charset=utf-8');
+  res.sendFile(path.join(ROOT_DIR, 'styles.css'));
+});
+
+app.get('/common.js', (req, res) => {
+  res.type('application/javascript; charset=utf-8');
+  res.sendFile(path.join(ROOT_DIR, 'common.js'));
+});
+
 app.use(express.static(ROOT_DIR, { extensions: ['html'] }));
+app.use(express.static(path.join(ROOT_DIR, 'public')));
 
 app.use((req, res) => {
+  if (STATIC_ASSET_EXT_RE.test(req.path)) {
+    return res.status(404).send('Not found');
+  }
   res.sendFile(path.join(ROOT_DIR, 'index.html'));
 });
 
