@@ -1,9 +1,11 @@
 require('dotenv').config();
 const crypto = require('crypto');
 const path = require('path');
+const zlib = require('zlib');
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const db = require('./db');
+const media = require('./cloudinary');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -22,11 +24,15 @@ const UPSTREAM_TIMEOUT_MS = 45000;
 
 const DEFAULT_ADMIN_EMAIL = 'choolwechingobe2@gmail.com';
 const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || DEFAULT_ADMIN_EMAIL).trim().toLowerCase();
+const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || '').trim();
 const tokenCache = new Map();
 
 const BLOCKED_FILES = new Set([
   '/server.js',
   '/db.js',
+  '/cloudinary.js',
+  '/api/index.js',
+  '/vercel.json',
   '/package.json',
   '/package-lock.json',
   '/metadata.json',
@@ -35,6 +41,53 @@ const BLOCKED_FILES = new Set([
 ]);
 
 app.use(express.json({ limit: '25mb' }));
+
+// Ensure MongoDB connection attempt settles once per serverless/server lifecycle
+app.use('/api', async (req, res, next) => {
+  await db.ensureDBConnected();
+  return next();
+});
+
+// Lightweight gzip compression for JSON & text responses
+app.use((req, res, next) => {
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  if (!acceptEncoding.includes('gzip') || req.path.includes('/photo/')) {
+    return next();
+  }
+  const origJson = res.json.bind(res);
+  res.json = (body) => {
+    const raw = Buffer.from(JSON.stringify(body), 'utf8');
+    if (raw.length < 1024) {
+      return origJson(body);
+    }
+    zlib.gzip(raw, (err, compressed) => {
+      if (err || res.headersSent) {
+        return origJson(body);
+      }
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.setHeader('Content-Length', String(compressed.length));
+      res.end(compressed);
+    });
+    return res;
+  };
+  return next();
+});
+
+const UPSTREAM_CATALOG_TTL_MS = 30 * 1000;
+let upstreamCatalogCache = {
+  products: null,
+  categories: null,
+  fetchedAt: 0,
+  inflight: null,
+};
+
+function invalidateCatalogCache() {
+  upstreamCatalogCache.fetchedAt = 0;
+  upstreamCatalogCache.products = null;
+  upstreamCatalogCache.categories = null;
+}
 
 function useUpstreamProxy() {
   return !db.isMongoReady() && Boolean(UPSTREAM_API_URL);
@@ -151,24 +204,250 @@ async function mergeUpstreamWithLocalProducts(upstreamProducts) {
   return [...byId.values()];
 }
 
+function mergeSubcategoriesMaps(upMap, localMap) {
+  const merged = {};
+  for (const src of [upMap, localMap]) {
+    if (!src || typeof src !== 'object' || Array.isArray(src)) continue;
+    for (const [cat, list] of Object.entries(src)) {
+      if (!Array.isArray(list)) continue;
+      if (!merged[cat]) merged[cat] = [];
+      for (const sub of list) {
+        const clean = String(sub || '').trim();
+        if (clean && !merged[cat].some((item) => item.toLowerCase() === clean.toLowerCase())) {
+          merged[cat].push(clean);
+        }
+      }
+    }
+  }
+  return merged;
+}
+
 async function mergeUpstreamWithLocalCategories(upstreamCatData) {
   const localMeta = await db.getCategoriesMeta();
   const upList = Array.isArray(upstreamCatData?.categories) ? upstreamCatData.categories : [];
   const upSizes = Array.isArray(upstreamCatData?.sizeCategories) ? upstreamCatData.sizeCategories : [];
   const upColors = Array.isArray(upstreamCatData?.colorCategories) ? upstreamCatData.colorCategories : [];
+  const upSubs = upstreamCatData?.subcategories && typeof upstreamCatData.subcategories === 'object'
+    ? upstreamCatData.subcategories
+    : {};
+  const mergedSubs = Object.keys(localMeta.subcategories || {}).length > 0
+    ? { ...upSubs, ...localMeta.subcategories }
+    : mergeSubcategoriesMaps(upSubs, localMeta.subcategories);
   if (localMeta.list.length > 0) {
     return {
       categories: [...new Set([...upList, ...localMeta.list])],
       sizeCategories: [...new Set([...upSizes, ...localMeta.sizeCategories])],
       colorCategories: [...new Set([...upColors, ...localMeta.colorCategories])],
+      subcategories: mergedSubs,
     };
   }
   return {
     categories: upList,
     sizeCategories: upSizes,
     colorCategories: upColors,
+    subcategories: mergedSubs,
   };
 }
+
+async function getCachedUpstreamCatalog(forceRefresh = false) {
+  const fresh = !forceRefresh
+    && upstreamCatalogCache.products
+    && upstreamCatalogCache.categories
+    && (Date.now() - upstreamCatalogCache.fetchedAt) < UPSTREAM_CATALOG_TTL_MS;
+  if (fresh) {
+    return {
+      products: upstreamCatalogCache.products,
+      categories: upstreamCatalogCache.categories,
+    };
+  }
+  if (!forceRefresh && upstreamCatalogCache.inflight) {
+    return upstreamCatalogCache.inflight;
+  }
+  const job = (async () => {
+    const [prodRes, catRes] = await Promise.all([
+      fetchUpstream('/api/products'),
+      fetchUpstream('/api/categories'),
+    ]);
+    if (!prodRes.ok || !catRes.ok) {
+      throw new Error(`Upstream catalog status ${prodRes.status}/${catRes.status}`);
+    }
+    const [prodData, catData] = await Promise.all([prodRes.json(), catRes.json()]);
+    upstreamCatalogCache.products = Array.isArray(prodData.products) ? prodData.products : [];
+    upstreamCatalogCache.categories = catData || {};
+    upstreamCatalogCache.fetchedAt = Date.now();
+    return {
+      products: upstreamCatalogCache.products,
+      categories: upstreamCatalogCache.categories,
+    };
+  })().finally(() => {
+    upstreamCatalogCache.inflight = null;
+  });
+  upstreamCatalogCache.inflight = job;
+  return job;
+}
+
+async function loadAllRawProducts() {
+  if (!useUpstreamProxy()) {
+    return db.listProducts();
+  }
+  try {
+    const { products: upProducts } = await getCachedUpstreamCatalog();
+    return mergeUpstreamWithLocalProducts(upProducts);
+  } catch {
+    return db.listProducts();
+  }
+}
+
+// ---------- Binary Cached Product Photo Endpoint (fast browser-cached images) ----------
+app.get('/api/products/:id/photo/:index', async (req, res, next) => {
+  try {
+    const productId = decodeURIComponent(String(req.params.id || ''));
+    const index = Number.parseInt(req.params.index, 10);
+    const versionHash = String(req.query.v || '').trim();
+    if (!productId || !Number.isInteger(index) || index < 0) {
+      return res.status(400).send('Invalid photo request');
+    }
+    let photo = media.getCachedPhoto(productId, index, versionHash);
+    if (!photo) {
+      const rawProducts = await loadAllRawProducts();
+      media.registerProductsList(rawProducts);
+      photo = media.getCachedPhoto(productId, index, versionHash);
+    }
+    if (!photo) {
+      return res.status(404).send('Photo not found');
+    }
+    const etag = `"photo-${photo.hash}"`;
+    res.setHeader('Content-Type', photo.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('ETag', etag);
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+    return res.send(photo.buffer);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ---------- Auth Provider Discovery & Google Sign-In ----------
+app.get('/api/auth/providers', (req, res) => {
+  res.json({
+    googleEnabled: Boolean(GOOGLE_CLIENT_ID),
+    googleClientId: GOOGLE_CLIENT_ID || '',
+  });
+});
+
+app.post('/api/auth/google', async (req, res, next) => {
+  try {
+    if (!GOOGLE_CLIENT_ID) {
+      return res.status(503).json({ error: 'Google Sign-In is not configured on this server yet.' });
+    }
+    const credential = String(req.body?.credential || '').trim();
+    if (!credential) {
+      return res.status(400).json({ error: 'Missing Google sign-in token.' });
+    }
+    const verifyRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
+    const payload = await verifyRes.json().catch(() => ({}));
+    if (!verifyRes.ok || payload.aud !== GOOGLE_CLIENT_ID || !payload.email) {
+      return res.status(401).json({ error: 'Google sign-in could not be verified. Please try again.' });
+    }
+    if (String(payload.email_verified) !== 'true') {
+      return res.status(401).json({ error: 'Please use a verified Google account email.' });
+    }
+    const email = String(payload.email).trim().toLowerCase();
+    const name = String(payload.name || payload.given_name || email.split('@')[0]).trim();
+    let user = await db.findUserByEmail(email);
+    if (!user) {
+      const randomHash = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10);
+      const isAdmin = Boolean(ADMIN_EMAIL && email === ADMIN_EMAIL);
+      user = await db.createUser({ name, email, passwordHash: randomHash, isAdmin });
+    }
+    const token = signToken(user.uid);
+    return res.json({ token, user: db.publicUser(user) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ---------- Admin Media Status & Cloudinary Migration ----------
+app.get('/api/admin/media-status', async (req, res, next) => {
+  try {
+    const user = await resolveUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required.' });
+    if (!user.isAdmin) return res.status(403).json({ error: 'Admin access required.' });
+    const rawProducts = await loadAllRawProducts();
+    return res.json({
+      cloudinaryConfigured: media.isCloudinaryConfigured(),
+      cloudName: media.getCloudinaryCloudName(),
+      legacyPhotoCount: media.countLegacyPhotos(rawProducts),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+app.post('/api/admin/migrate-photos', async (req, res, next) => {
+  try {
+    const user = await resolveUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required.' });
+    if (!user.isAdmin) return res.status(403).json({ error: 'Admin access required.' });
+    if (!media.isCloudinaryConfigured()) {
+      return res.status(400).json({
+        error: 'Set CLOUDINARY_URL with your real API key and secret in environment variables first.',
+      });
+    }
+    const rawProducts = await loadAllRawProducts();
+    let migratedProducts = 0;
+    let uploadedPhotos = 0;
+    const authHeader = req.headers.authorization || '';
+
+    for (const prod of rawProducts) {
+      const hasLegacy = media.isDataImageUri(prod?.image)
+        || (Array.isArray(prod?.gallery) && prod.gallery.some(media.isDataImageUri));
+      if (!hasLegacy) continue;
+
+      const beforeCount = media.countLegacyPhotos([prod]);
+      const updatedBody = await media.prepareProductPhotosForSave(prod.id, prod);
+      const afterCount = media.countLegacyPhotos([updatedBody]);
+      const uploadedForProduct = Math.max(0, beforeCount - afterCount);
+      if (uploadedForProduct === 0) continue;
+
+      let savedUpstream = false;
+      if (useUpstreamProxy()) {
+        try {
+          const upRes = await fetchUpstream(`/api/admin/products/${encodeURIComponent(String(prod.id))}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(authHeader ? { Authorization: authHeader } : {}),
+            },
+            body: JSON.stringify(updatedBody),
+          });
+          if (upRes.ok) savedUpstream = true;
+        } catch {
+          // Fall through to local store override
+        }
+      }
+      if (!savedUpstream) {
+        await db.saveProduct(prod.id, updatedBody);
+      } else {
+        await db.deleteProduct(prod.id).catch(() => {});
+      }
+      migratedProducts++;
+      uploadedPhotos += uploadedForProduct;
+    }
+
+    invalidateCatalogCache();
+    const freshProducts = await loadAllRawProducts();
+    return res.json({
+      migratedProducts,
+      uploadedPhotos,
+      remainingLegacy: media.countLegacyPhotos(freshProducts),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 // ---------- Upstream Proxy Middleware (when MONGODB_URI is not directly reachable) ----------
 app.use('/api', async (req, res, next) => {
@@ -244,21 +523,16 @@ app.use('/api', async (req, res, next) => {
     // Convenience aggregate endpoint supported alongside /api/products & /api/categories
     if (req.method === 'GET' && req.path === '/store') {
       try {
-        const [prodRes, catRes] = await Promise.all([
-          fetchUpstream('/api/products'),
-          fetchUpstream('/api/categories'),
-        ]);
-        if (prodRes.ok && catRes.ok) {
-          const [prodData, catData] = await Promise.all([prodRes.json(), catRes.json()]);
-          const products = await mergeUpstreamWithLocalProducts(prodData.products);
-          const mergedCats = await mergeUpstreamWithLocalCategories(catData);
-          return res.json({
-            products,
-            categories: mergedCats.categories,
-            sizeCategories: mergedCats.sizeCategories,
-            colorCategories: mergedCats.colorCategories,
-          });
-        }
+        const { products: upProducts, categories: catData } = await getCachedUpstreamCatalog();
+        const products = media.registerProductsList(await mergeUpstreamWithLocalProducts(upProducts));
+        const mergedCats = await mergeUpstreamWithLocalCategories(catData);
+        return res.json({
+          products,
+          categories: mergedCats.categories,
+          sizeCategories: mergedCats.sizeCategories,
+          colorCategories: mergedCats.colorCategories,
+          subcategories: mergedCats.subcategories || {},
+        });
       } catch (err) {
         console.log('[Storefront Sync] Upstream unavailable, using local fallback:', err.message);
       }
@@ -268,27 +542,25 @@ app.use('/api', async (req, res, next) => {
         db.getCategoriesMeta(),
       ]);
       return res.json({
-        products: localProducts,
+        products: media.registerProductsList(localProducts),
         categories: localMeta.list,
         sizeCategories: localMeta.sizeCategories,
         colorCategories: localMeta.colorCategories,
+        subcategories: localMeta.subcategories || {},
       });
     }
 
     // Merge local fallback products on /api/products as well
     if (req.method === 'GET' && req.path === '/products') {
       try {
-        const prodRes = await fetchUpstream('/api/products');
-        if (prodRes.ok) {
-          const prodData = await prodRes.json();
-          const products = await mergeUpstreamWithLocalProducts(prodData.products);
-          return res.json({ products });
-        }
+        const { products: upProducts } = await getCachedUpstreamCatalog();
+        const products = media.registerProductsList(await mergeUpstreamWithLocalProducts(upProducts));
+        return res.json({ products });
       } catch (err) {
         console.log('[Products Sync] Upstream unavailable, using local fallback:', err.message);
       }
       const localProducts = await db.listProducts();
-      return res.json({ products: localProducts });
+      return res.json({ products: media.registerProductsList(localProducts) });
     }
 
     // Resilient product save (PUT /api/admin/products/:id or /api/products/:id)
@@ -299,20 +571,28 @@ app.use('/api', async (req, res, next) => {
       if (req.headers.authorization) headers.Authorization = req.headers.authorization;
       if (req.method === 'PUT') headers['Content-Type'] = 'application/json';
 
+      const preparedBody = req.method === 'PUT'
+        ? await media.prepareProductPhotosForSave(productId, req.body || {}, { loadRawProducts: loadAllRawProducts })
+        : undefined;
+
       try {
         const upstreamRes = await fetchUpstream(req.originalUrl, {
           method: req.method,
           headers,
-          body: req.method === 'PUT' ? JSON.stringify(req.body || {}) : undefined,
+          body: req.method === 'PUT' ? JSON.stringify(preparedBody) : undefined,
         });
         const contentType = upstreamRes.headers.get('content-type') || 'application/json';
         const text = await upstreamRes.text();
         if (upstreamRes.ok) {
+          invalidateCatalogCache();
           if (req.method === 'PUT') {
             db.unmarkProductDeleted(productId);
-            const wantedPromo = req.body && req.body.promoPrice !== undefined && req.body.promoPrice !== null && req.body.promoPrice !== ''
-              ? Number(req.body.promoPrice)
+            const wantedPromo = preparedBody && preparedBody.promoPrice !== undefined && preparedBody.promoPrice !== null && preparedBody.promoPrice !== ''
+              ? Number(preparedBody.promoPrice)
               : undefined;
+            const wantedSubcategory = preparedBody && typeof preparedBody.subcategory === 'string' && preparedBody.subcategory.trim()
+              ? preparedBody.subcategory.trim()
+              : '';
             let parsedUpstream = null;
             try {
               parsedUpstream = JSON.parse(text);
@@ -320,12 +600,20 @@ app.use('/api', async (req, res, next) => {
               parsedUpstream = null;
             }
             const returnedPromo = parsedUpstream?.product?.promoPrice;
-            if (wantedPromo !== undefined && (returnedPromo === undefined || Number(returnedPromo) !== wantedPromo)) {
-              const mergedProduct = { ...(parsedUpstream?.product || req.body || {}), promoPrice: wantedPromo };
+            const returnedSubcategory = String(parsedUpstream?.product?.subcategory || '').trim();
+            const needsLocalOverlay = (wantedPromo !== undefined && (returnedPromo === undefined || Number(returnedPromo) !== wantedPromo))
+              || (wantedSubcategory && returnedSubcategory !== wantedSubcategory);
+            if (needsLocalOverlay) {
+              const mergedProduct = { ...(parsedUpstream?.product || preparedBody || {}) };
+              if (wantedPromo !== undefined) mergedProduct.promoPrice = wantedPromo;
+              if (wantedSubcategory) mergedProduct.subcategory = wantedSubcategory;
               const savedLocal = await db.saveProduct(productId, mergedProduct);
-              return res.json({ product: savedLocal });
+              return res.json({ product: media.registerProductPhotos(savedLocal) });
             }
             await db.deleteProduct(productId).catch(() => {});
+            if (parsedUpstream?.product) {
+              return res.json({ ...parsedUpstream, product: media.registerProductPhotos(parsedUpstream.product) });
+            }
           } else {
             await db.deleteProduct(productId).catch(() => {});
             db.unmarkProductDeleted(productId);
@@ -345,9 +633,10 @@ app.use('/api', async (req, res, next) => {
       if (!user.isAdmin) {
         return res.status(403).json({ error: 'Admin access required.' });
       }
+      invalidateCatalogCache();
       if (req.method === 'PUT') {
-        const product = await db.saveProduct(productId, req.body || {});
-        return res.json({ product });
+        const product = await db.saveProduct(productId, preparedBody || {});
+        return res.json({ product: media.registerProductPhotos(product) });
       }
       await db.deleteProduct(productId);
       db.markProductDeleted(productId);
@@ -358,6 +647,9 @@ app.use('/api', async (req, res, next) => {
     if (req.method === 'PUT' && (req.path === '/admin/categories' || req.path === '/categories')) {
       const headers = { 'Content-Type': 'application/json' };
       if (req.headers.authorization) headers.Authorization = req.headers.authorization;
+      const requestedSubs = req.body?.subcategories && typeof req.body.subcategories === 'object'
+        ? req.body.subcategories
+        : {};
       try {
         const upstreamRes = await fetchUpstream(req.originalUrl, {
           method: 'PUT',
@@ -367,7 +659,21 @@ app.use('/api', async (req, res, next) => {
         const contentType = upstreamRes.headers.get('content-type') || 'application/json';
         const text = await upstreamRes.text();
         if (upstreamRes.ok) {
-          return res.status(upstreamRes.status).type(contentType).send(text);
+          invalidateCatalogCache();
+          let parsed = null;
+          try { parsed = JSON.parse(text); } catch { parsed = null; }
+          const savedLocal = await db.saveCategoriesMeta({
+            list: parsed?.categories || req.body?.list,
+            sizeCategories: parsed?.sizeCategories || req.body?.sizeCategories,
+            colorCategories: parsed?.colorCategories || req.body?.colorCategories,
+            subcategories: requestedSubs,
+          });
+          return res.json({
+            categories: savedLocal.list,
+            sizeCategories: savedLocal.sizeCategories,
+            colorCategories: savedLocal.colorCategories,
+            subcategories: savedLocal.subcategories || {},
+          });
         }
         console.log('[Category Save] Upstream returned', upstreamRes.status, '— using local fallback store.');
       } catch (err) {
@@ -376,15 +682,18 @@ app.use('/api', async (req, res, next) => {
       const user = await resolveUserFromRequest(req);
       if (!user) return res.status(401).json({ error: 'Your session expired. Please sign in again.' });
       if (!user.isAdmin) return res.status(403).json({ error: 'Admin access required.' });
+      invalidateCatalogCache();
       const saved = await db.saveCategoriesMeta({
         list: req.body?.list,
         sizeCategories: req.body?.sizeCategories,
         colorCategories: req.body?.colorCategories,
+        subcategories: requestedSubs,
       });
       return res.json({
         categories: saved.list,
         sizeCategories: saved.sizeCategories,
         colorCategories: saved.colorCategories,
+        subcategories: saved.subcategories || {},
       });
     }
 
@@ -480,10 +789,11 @@ app.get('/api/store', async (req, res, next) => {
       db.getCategoriesMeta(),
     ]);
     res.json({
-      products,
+      products: media.registerProductsList(products),
       categories: meta.list,
       sizeCategories: meta.sizeCategories,
       colorCategories: meta.colorCategories,
+      subcategories: meta.subcategories || {},
     });
   } catch (err) {
     next(err);
@@ -493,7 +803,7 @@ app.get('/api/store', async (req, res, next) => {
 app.get('/api/products', async (req, res, next) => {
   try {
     const products = await db.listProducts();
-    res.json({ products });
+    res.json({ products: media.registerProductsList(products) });
   } catch (err) {
     next(err);
   }
@@ -506,6 +816,7 @@ app.get('/api/categories', async (req, res, next) => {
       categories: meta.list,
       sizeCategories: meta.sizeCategories,
       colorCategories: meta.colorCategories,
+      subcategories: meta.subcategories || {},
     });
   } catch (err) {
     next(err);
@@ -671,8 +982,11 @@ app.patch('/api/users/me', requireAuth, async (req, res, next) => {
 // ---------- Products (Admin writes) ----------
 async function handleSaveProduct(req, res, next) {
   try {
-    const product = await db.saveProduct(req.params.id, req.body || {});
-    res.json({ product });
+    const prepared = await media.prepareProductPhotosForSave(req.params.id, req.body || {}, {
+      loadRawProducts: () => db.listProducts(),
+    });
+    const product = await db.saveProduct(req.params.id, prepared);
+    res.json({ product: media.registerProductPhotos(product) });
   } catch (err) {
     next(err);
   }
@@ -699,11 +1013,13 @@ async function handleSaveCategories(req, res, next) {
       list: req.body?.list,
       sizeCategories: req.body?.sizeCategories,
       colorCategories: req.body?.colorCategories,
+      subcategories: req.body?.subcategories,
     });
     res.json({
       categories: saved.list,
       sizeCategories: saved.sizeCategories,
       colorCategories: saved.colorCategories,
+      subcategories: saved.subcategories || {},
     });
   } catch (err) {
     next(err);
@@ -894,11 +1210,15 @@ app.use((req, res) => {
   res.sendFile(path.join(ROOT_DIR, 'index.html'));
 });
 
-db.connectDB().finally(() => {
-  if (useUpstreamProxy()) {
-    console.log(`[API Proxy] Forwarding /api/* to ${UPSTREAM_API_URL}`);
-  }
-  app.listen(PORT, HOST, () => {
-    console.log(`RK CONNEKT server listening on http://${HOST}:${PORT}`);
+if (require.main === module && !process.env.VERCEL) {
+  db.ensureDBConnected().finally(() => {
+    if (useUpstreamProxy()) {
+      console.log(`[API Proxy] Forwarding /api/* to ${UPSTREAM_API_URL}`);
+    }
+    app.listen(PORT, HOST, () => {
+      console.log(`RK CONNEKT server listening on http://${HOST}:${PORT}`);
+    });
   });
-});
+}
+
+module.exports = app;

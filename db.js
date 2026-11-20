@@ -1,9 +1,12 @@
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const mongoose = require('mongoose');
 
-const LOCAL_STORE_PATH = path.join(__dirname, '.local-dev-store.json');
+const LOCAL_STORE_PATH = process.env.VERCEL
+  ? path.join(os.tmpdir(), 'rk-connekt-store.json')
+  : path.join(__dirname, '.local-dev-store.json');
 
 mongoose.set('bufferCommands', false);
 
@@ -18,6 +21,7 @@ const ProductSchema = new mongoose.Schema(
     image: String,
     gallery: [String],
     category: String,
+    subcategory: String,
     description: String,
     options: mongoose.Schema.Types.Mixed,
     sku: String,
@@ -34,6 +38,7 @@ const MetaSchema = new mongoose.Schema(
     sizeCategories: [String],
     colorCategories: [String],
     variantCategories: [String],
+    subcategories: mongoose.Schema.Types.Mixed,
   },
   { strict: false, versionKey: false, collection: 'meta' }
 );
@@ -126,6 +131,7 @@ function loadLocalStore() {
       list: [],
       sizeCategories: [],
       colorCategories: [],
+      subcategories: {},
     },
     users: [],
     orders: [],
@@ -176,13 +182,14 @@ mongoose.connection.on('error', () => {
   mongoConnected = false;
 });
 
-function normalizeMongoUri(rawUri) {
+function normalizeMongoUri(rawUri, { stripPasswordBrackets = false } = {}) {
   let uri = String(rawUri || '').trim();
+  uri = uri.replace(/^(?:MONGODB_URI|MONGO_URI)\s*=\s*/i, '').trim();
   if ((uri.startsWith('"') && uri.endsWith('"')) || (uri.startsWith("'") && uri.endsWith("'"))) {
     uri = uri.slice(1, -1).trim();
   }
   if (!uri || !/^mongodb(\+srv)?:\/\//i.test(uri)) return '';
-  if (/<[^>]*password[^>]*>/i.test(uri)) return '';
+  if (/<[^>]*(?:password|pass|your_)[^>]*>/i.test(uri)) return '';
 
   const schemeEnd = uri.indexOf('://') + 3;
   const pathStart = uri.indexOf('/', schemeEnd);
@@ -198,7 +205,10 @@ function normalizeMongoUri(rawUri) {
   if (colonIndex === -1) return uri;
 
   const rawUser = userInfo.slice(0, colonIndex);
-  const rawPass = userInfo.slice(colonIndex + 1);
+  let rawPass = userInfo.slice(colonIndex + 1);
+  if (stripPasswordBrackets && rawPass.startsWith('<') && rawPass.endsWith('>') && rawPass.length > 2) {
+    rawPass = rawPass.slice(1, -1);
+  }
   const safeEncode = (value) => {
     try {
       return encodeURIComponent(decodeURIComponent(value));
@@ -220,33 +230,56 @@ async function connectDB() {
   if (!uri) {
     mongoConnected = false;
     if (!hasUpstream) {
-      console.log('[MongoDB] Using local fallback store.');
+      console.log('[Store] Using local data store.');
     }
     return false;
   }
 
-  try {
-    const options = {
-      serverSelectionTimeoutMS: 5000,
-    };
-    const dbName = (process.env.MONGODB_DB || process.env.MONGODB_DB_NAME || '').trim();
-    if (dbName) {
-      options.dbName = dbName;
-    }
-    await mongoose.connect(uri, options);
+  const options = {
+    serverSelectionTimeoutMS: 5000,
+  };
+  const dbName = (process.env.MONGODB_DB || process.env.MONGODB_DB_NAME || '').trim();
+  if (dbName) {
+    options.dbName = dbName;
+  }
+
+  const tryConnect = async (targetUri) => {
+    await mongoose.connect(targetUri, options);
     mongoConnected = true;
     console.log('[MongoDB] Connected directly.');
     return true;
-  } catch (err) {
-    mongoConnected = false;
+  };
+
+  try {
+    return await tryConnect(uri);
+  } catch {
     await mongoose.disconnect().catch(() => {});
+    const altUri = normalizeMongoUri(rawUri, { stripPasswordBrackets: true });
+    if (altUri && altUri !== uri) {
+      try {
+        return await tryConnect(altUri);
+      } catch {
+        await mongoose.disconnect().catch(() => {});
+      }
+    }
+    mongoConnected = false;
     if (hasUpstream) {
-      console.log(`[MongoDB] Direct connection skipped (${err.message}); using Render API backend.`);
+      console.log('[Store] Using Render API backend.');
     } else {
-      console.log(`[MongoDB] Direct connection unavailable (${err.message}); using local fallback store.`);
+      console.log('[Store] Using local data store.');
     }
     return false;
   }
+}
+
+let connectPromise = null;
+
+function ensureDBConnected() {
+  if (isMongoReady()) return Promise.resolve(true);
+  if (!connectPromise) {
+    connectPromise = connectDB().catch(() => false);
+  }
+  return connectPromise;
 }
 
 function isMongoReady() {
@@ -288,6 +321,7 @@ function normalizeProduct(doc) {
     image,
     gallery,
     category: obj.category ?? '',
+    subcategory: obj.subcategory ? String(obj.subcategory).trim() : '',
     description: obj.description ?? '',
   };
   if (obj.promoPrice !== undefined && obj.promoPrice !== null && obj.promoPrice !== '') {
@@ -400,6 +434,11 @@ async function saveProduct(rawId, payload) {
   if (!cleanPayload.options || typeof cleanPayload.options !== 'object' || !Object.keys(cleanPayload.options).length) {
     delete cleanPayload.options;
   }
+  if (cleanPayload.subcategory !== undefined && cleanPayload.subcategory !== null) {
+    const cleanSub = String(cleanPayload.subcategory).trim();
+    if (cleanSub) cleanPayload.subcategory = cleanSub;
+    else delete cleanPayload.subcategory;
+  }
 
   if (!isMongoReady()) {
     const idx = memoryStore.products.findIndex((p) => String(p.id) === String(rawId));
@@ -422,7 +461,7 @@ async function saveProduct(rawId, payload) {
     // Preserve original id type if updating an existing document
     updateDoc.id = existing.id !== undefined && existing.id !== null ? existing.id : cleanPayload.id;
     const unsetFields = {};
-    for (const optField of ['promoPrice', 'bulkPrice', 'bulkMinQty', 'options']) {
+    for (const optField of ['promoPrice', 'bulkPrice', 'bulkMinQty', 'options', 'subcategory']) {
       if (updateDoc[optField] === undefined) {
         delete updateDoc[optField];
         unsetFields[optField] = '';
@@ -471,6 +510,28 @@ function unmarkProductDeleted(rawId) {
 }
 
 // ---------- Categories Meta ----------
+function normalizeSubcategoriesMap(rawMap, allowedCategories = null) {
+  const out = {};
+  if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap)) return out;
+  for (const [cat, items] of Object.entries(rawMap)) {
+    const cleanCat = String(cat || '').trim();
+    if (!cleanCat) continue;
+    if (Array.isArray(allowedCategories) && !allowedCategories.includes(cleanCat)) continue;
+    const seen = new Set();
+    const list = [];
+    for (const entry of Array.isArray(items) ? items : []) {
+      const cleanSub = String(entry || '').trim().slice(0, 50);
+      if (!cleanSub) continue;
+      const lower = cleanSub.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      list.push(cleanSub);
+    }
+    if (list.length) out[cleanCat] = list;
+  }
+  return out;
+}
+
 async function getCategoriesMeta() {
   if (!isMongoReady()) {
     const data = memoryStore.metaCategories;
@@ -478,6 +539,7 @@ async function getCategoriesMeta() {
       list: Array.isArray(data.list) ? [...data.list] : [],
       sizeCategories: Array.isArray(data.sizeCategories) ? [...data.sizeCategories] : [],
       colorCategories: Array.isArray(data.colorCategories) ? [...data.colorCategories] : [],
+      subcategories: normalizeSubcategoriesMap(data.subcategories),
     };
   }
   const doc = await Meta.findOne({ $or: [{ _id: 'categories' }, { key: 'categories' }] }).lean();
@@ -487,17 +549,20 @@ async function getCategoriesMeta() {
     list: Array.isArray(data.list) ? data.list : [],
     sizeCategories: Array.isArray(data.sizeCategories) ? data.sizeCategories : legacy,
     colorCategories: Array.isArray(data.colorCategories) ? data.colorCategories : legacy,
+    subcategories: normalizeSubcategoriesMap(data.subcategories),
   };
 }
 
-async function saveCategoriesMeta({ list, sizeCategories, colorCategories }) {
+async function saveCategoriesMeta({ list, sizeCategories, colorCategories, subcategories }) {
   const cleanList = Array.isArray(list) ? list : [];
   const cleanSizes = (Array.isArray(sizeCategories) ? sizeCategories : []).filter((c) => cleanList.includes(c));
   const cleanColors = (Array.isArray(colorCategories) ? colorCategories : []).filter((c) => cleanList.includes(c));
+  const cleanSubs = normalizeSubcategoriesMap(subcategories, cleanList);
   const payload = {
     list: cleanList,
     sizeCategories: cleanSizes,
     colorCategories: cleanColors,
+    subcategories: cleanSubs,
   };
 
   if (!isMongoReady()) {
@@ -904,6 +969,7 @@ async function deleteDidYouKnow(id) {
 
 module.exports = {
   connectDB,
+  ensureDBConnected,
   isMongoReady,
   publicUser,
   listProducts,

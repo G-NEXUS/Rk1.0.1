@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#10100e">
     <title>RK CONNEKT</title>
-    <link rel="stylesheet" href="styles.css?v=29">
+    <link rel="stylesheet" href="styles.css?v=33">
 </head>
 <body>
     <nav class="top-nav" aria-label="Main navigation">
@@ -71,24 +71,42 @@
         <section class="auth-stage"><div class="form-container auth-form">
             <button class="auth-close" type="button" aria-label="Close form" onclick="location.hash = '#/home'">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-            </button><h1 class="text-center mb-20">Welcome Back</h1>
-            <p id="login-notice" class="auth-notice text-center mb-20" role="status" hidden></p>
-            <form onsubmit="handleLogin(event)">
-                <div class="form-group"><label for="login-email">Email Address</label><input type="email" id="login-email" autocomplete="email" required></div>
-                <div class="form-group">
-                <label for="login-password">Password</label>
-                <div class="password-field">
-                    <input type="password" id="login-password" required autocomplete="current-password">
-                    <button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePassword('login-password', this)">
-                        <svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-                        <svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5"/></svg>
-                    </button>
-                </div>
+            </button>
+            <h1 class="auth-title">Sign In</h1>
+            <p id="login-subtitle" class="auth-subtitle">Sign in with your email and password to access your account.</p>
+            <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+                <a href="#/login" class="auth-tab is-active" role="tab" aria-selected="true">Login</a>
+                <a href="#/register" class="auth-tab" role="tab" aria-selected="false">Register</a>
             </div>
-                <p class="text-center mb-20"><a class="text-accent" href="#/forgot-password">Forgot Password?</a></p>
-                <button type="submit" class="btn btn-full">Login</button>
+            <div id="login-google-wrap" class="auth-social-wrap" hidden>
+                <button type="button" id="login-google-btn" class="auth-google-btn" onclick="triggerGoogleAuth('login')">
+                    <svg class="auth-google-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21.35 11.1h-9.18v2.98h5.27c-.23 1.47-1.69 4.31-5.27 4.31-3.17 0-5.76-2.63-5.76-5.89s2.59-5.89 5.76-5.89c1.81 0 3.02.77 3.71 1.43l2.53-2.44C16.79 4.09 14.69 3.2 12.17 3.2 7.21 3.2 3.2 7.21 3.2 12.17s4.01 8.97 8.97 8.97c5.18 0 8.61-3.64 8.61-8.77 0-.59-.06-1.04-.14-1.27Z"/></svg>
+                    <span>Sign in with Google</span>
+                </button>
+                <div class="auth-divider" aria-hidden="true"><span>OR WITH EMAIL</span></div>
+            </div>
+            <p id="login-notice" class="auth-notice text-center mb-20" role="status" hidden></p>
+            <form class="auth-fields-form" onsubmit="handleLogin(event)">
+                <div class="form-group">
+                    <label for="login-email">Email Address</label>
+                    <input type="email" id="login-email" placeholder="you@example.com" autocomplete="email" required>
+                </div>
+                <div class="form-group">
+                    <div class="auth-label-row">
+                        <label for="login-password">Password</label>
+                        <a class="auth-forgot-link" href="#/forgot-password">Forgot password?</a>
+                    </div>
+                    <div class="password-field">
+                        <input type="password" id="login-password" placeholder="Enter your password" required autocomplete="current-password">
+                        <button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePassword('login-password', this)">
+                            <svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                            <svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-full auth-submit-btn">Sign In with Email</button>
             </form>
-            <p class="text-center mt-20">Don't have an account? <a class="text-accent" href="#/register">Register here</a></p>
+            <p class="auth-footer">Looking to browse first? <a class="auth-footer-link" href="#/home">Return to Shop</a></p>
         </div></section>
     </template>
 
@@ -96,24 +114,53 @@
         <section class="auth-stage"><div class="form-container auth-form">
             <button class="auth-close" type="button" aria-label="Close form" onclick="location.hash = '#/home'">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-            </button><h1 class="text-center mb-20">Create Account</h1>
-            <p id="register-notice" class="auth-notice text-center mb-20" role="alert" hidden></p>
-            <form onsubmit="handleRegister(event)">
-                <div class="form-group"><label for="reg-name">Full Name</label><input type="text" id="reg-name" autocomplete="name" required></div>
-                <div class="form-group"><label for="reg-email">Email Address</label><input type="email" id="reg-email" autocomplete="email" required></div>
-                <div class="form-group">
-                <label for="reg-password">Password</label>
-                <div class="password-field">
-                    <input type="password" id="reg-password" required autocomplete="new-password">
-                    <button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePassword('reg-password', this)">
-                        <svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-                        <svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5"/></svg>
-                    </button>
-                </div>
+            </button>
+            <h1 class="auth-title">Create Account</h1>
+            <p id="register-subtitle" class="auth-subtitle">Create an email and password account to get started.</p>
+            <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+                <a href="#/login" class="auth-tab" role="tab" aria-selected="false">Login</a>
+                <a href="#/register" class="auth-tab is-active" role="tab" aria-selected="true">Register</a>
             </div>
-                <button type="submit" class="btn btn-full">Register</button>
+            <div id="register-google-wrap" class="auth-social-wrap" hidden>
+                <button type="button" id="register-google-btn" class="auth-google-btn" onclick="triggerGoogleAuth('register')">
+                    <svg class="auth-google-icon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21.35 11.1h-9.18v2.98h5.27c-.23 1.47-1.69 4.31-5.27 4.31-3.17 0-5.76-2.63-5.76-5.89s2.59-5.89 5.76-5.89c1.81 0 3.02.77 3.71 1.43l2.53-2.44C16.79 4.09 14.69 3.2 12.17 3.2 7.21 3.2 3.2 7.21 3.2 12.17s4.01 8.97 8.97 8.97c5.18 0 8.61-3.64 8.61-8.77 0-.59-.06-1.04-.14-1.27Z"/></svg>
+                    <span>Sign up with Google</span>
+                </button>
+                <div class="auth-divider" aria-hidden="true"><span>OR WITH EMAIL</span></div>
+            </div>
+            <p id="register-notice" class="auth-notice text-center mb-20" role="alert" hidden></p>
+            <form class="auth-fields-form" onsubmit="handleRegister(event)">
+                <div class="form-group">
+                    <label for="reg-name">Full Name</label>
+                    <input type="text" id="reg-name" placeholder="e.g. Choolwe Chingobe" autocomplete="name" required>
+                </div>
+                <div class="form-group">
+                    <label for="reg-email">Email Address</label>
+                    <input type="email" id="reg-email" placeholder="you@example.com" autocomplete="email" required>
+                </div>
+                <div class="form-group">
+                    <label for="reg-password">Password</label>
+                    <div class="password-field">
+                        <input type="password" id="reg-password" placeholder="Minimum 6 characters" minlength="6" required autocomplete="new-password">
+                        <button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePassword('reg-password', this)">
+                            <svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                            <svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="reg-confirm-password">Confirm Password</label>
+                    <div class="password-field">
+                        <input type="password" id="reg-confirm-password" placeholder="Re-enter your password" minlength="6" required autocomplete="new-password">
+                        <button class="password-toggle" type="button" aria-label="Show confirm password" aria-pressed="false" onclick="togglePassword('reg-confirm-password', this)">
+                            <svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                            <svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-full auth-submit-btn">Create Account</button>
             </form>
-            <p class="text-center mt-20">Already have an account? <a class="text-accent" href="#/login">Login here</a></p>
+            <p class="auth-footer">Looking to browse first? <a class="auth-footer-link" href="#/home">Return to Shop</a></p>
         </div></section>
     </template>
 
@@ -121,11 +168,18 @@
         <section class="auth-stage"><div class="form-container auth-form">
             <button class="auth-close" type="button" aria-label="Close form" onclick="location.hash = '#/home'">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-            </button><h1 class="text-center mb-20">Reset Password</h1>
+            </button>
+            <h1 class="auth-title">Reset Password</h1>
+            <p class="auth-subtitle">Enter your email address and we'll send you a link to reset your password.</p>
             <p id="reset-notice" class="auth-notice text-center mb-20" role="status" hidden></p>
-            <p class="mb-20 text-center">Enter your email and we'll send you a link to reset your password.</p>
-            <form onsubmit="handlePasswordReset(event)"><div class="form-group"><label for="reset-email">Email Address</label><input type="email" id="reset-email" autocomplete="email" required></div><button type="submit" class="btn btn-full">Send Reset Link</button></form>
-            <p class="text-center mt-20"><a class="text-accent" href="#/login">Back to Login</a></p>
+            <form class="auth-fields-form" onsubmit="handlePasswordReset(event)">
+                <div class="form-group">
+                    <label for="reset-email">Email Address</label>
+                    <input type="email" id="reset-email" placeholder="you@example.com" autocomplete="email" required>
+                </div>
+                <button type="submit" class="btn btn-full auth-submit-btn">Send Reset Link</button>
+            </form>
+            <p class="auth-footer">Remembered your password? <a class="auth-footer-link" href="#/login">Back to Login</a></p>
         </div></section>
     </template>
 
@@ -133,13 +187,15 @@
         <section class="auth-stage"><div class="form-container auth-form">
             <button class="auth-close" type="button" aria-label="Close form" onclick="location.hash = '#/home'">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-            </button><h1 class="text-center mb-20">Choose New Password</h1>
+            </button>
+            <h1 class="auth-title">New Password</h1>
+            <p class="auth-subtitle">Choose a new password with at least 6 characters.</p>
             <p id="complete-reset-notice" class="auth-notice text-center mb-20" role="alert" hidden></p>
-            <form onsubmit="handleCompletePasswordReset(event)">
+            <form class="auth-fields-form" onsubmit="handleCompletePasswordReset(event)">
                 <div class="form-group">
                     <label for="new-password">New Password</label>
                     <div class="password-field">
-                        <input type="password" id="new-password" minlength="6" required autocomplete="new-password">
+                        <input type="password" id="new-password" placeholder="Minimum 6 characters" minlength="6" required autocomplete="new-password">
                         <button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePassword('new-password', this)">
                             <svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
                             <svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5"/></svg>
@@ -149,16 +205,16 @@
                 <div class="form-group">
                     <label for="confirm-password">Confirm Password</label>
                     <div class="password-field">
-                        <input type="password" id="confirm-password" minlength="6" required autocomplete="new-password">
+                        <input type="password" id="confirm-password" placeholder="Re-enter your password" minlength="6" required autocomplete="new-password">
                         <button class="password-toggle" type="button" aria-label="Show confirm password" aria-pressed="false" onclick="togglePassword('confirm-password', this)">
                             <svg class="icon-eye" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
                             <svg class="icon-eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a15.8 15.8 0 0 1-3.1 3.8M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5"/></svg>
                         </button>
                     </div>
                 </div>
-                <button type="submit" class="btn btn-full">Update Password</button>
+                <button type="submit" class="btn btn-full auth-submit-btn">Update Password</button>
             </form>
-            <p class="text-center mt-20"><a class="text-accent" href="#/login">Back to Login</a></p>
+            <p class="auth-footer"><a class="auth-footer-link" href="#/login">Back to Login</a></p>
         </div></section>
     </template>
 
@@ -243,9 +299,17 @@
                         <small class="form-hint">Add up to 7 photos. Images are automatically resized for fast saving. The first photo is the main photo.</small>
                         <div id="product-photo-list" class="photo-list"></div>
                     </div>
-                    <div class="form-group">
-                        <label for="p-category">Category</label>
-                        <select id="p-category" onchange="syncVariantFields()"></select>
+                    <div class="product-form-row">
+                        <div class="form-group">
+                            <label for="p-category">Category</label>
+                            <select id="p-category" onchange="syncProductSubcategoryOptions(); syncVariantFields()"></select>
+                        </div>
+                        <div class="form-group">
+                            <label for="p-subcategory">Subcategory <small>(optional)</small></label>
+                            <select id="p-subcategory">
+                                <option value="">None (optional)</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="product-form-row">
                         <div id="color-field" class="form-group">
@@ -307,6 +371,6 @@
         </div>
     </div>
 
-    <script src="common.js?v=28"></script>
+    <script src="common.js?v=33"></script>
 </body>
 </html>

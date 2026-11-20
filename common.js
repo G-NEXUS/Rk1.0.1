@@ -10,14 +10,35 @@ const store = {
     categories: [],
     sizeCategories: [],      // categories whose products have sizes
     colorCategories: [],     // categories whose products have colors
+    subcategories: {},       // { [categoryName]: string[] }
     allOrders: [],      // admin only
     myOrders: [],       // signed-in customer's own orders
     messages: [],       // contact-form messages (admin only)
     adminStats: { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 },
+    mediaStatus: { cloudinaryConfigured: false, cloudName: '', legacyPhotoCount: 0 },
+    authProviders: { googleEnabled: false, googleClientId: '', loaded: false },
     recentOrders: {},   // orders placed in this session
     user: null,         // { uid, name, email, isAdmin }
     loadError: false    // true when the product list could not be loaded
 };
+
+let inventoryViewMode = (() => {
+    try {
+        return localStorage.getItem('rk_inventory_view') === 'grid' ? 'grid' : 'list';
+    } catch {
+        return 'list';
+    }
+})();
+
+function setInventoryView(mode) {
+    inventoryViewMode = mode === 'grid' ? 'grid' : 'list';
+    try {
+        localStorage.setItem('rk_inventory_view', inventoryViewMode);
+    } catch {
+        // Ignore storage restrictions
+    }
+    renderAdmin('inventory');
+}
 
 let appReady = false;
 let authSettled = false;
@@ -138,6 +159,11 @@ function getProducts() { return store.products; }
 function getSavedCategories() { return store.categories; }
 function getSizeCategories() { return store.sizeCategories; }
 function getColorCategories() { return store.colorCategories; }
+function getSubcategoriesMap() { return store.subcategories && typeof store.subcategories === 'object' ? store.subcategories : {}; }
+function getSubcategoriesFor(category) {
+    const list = getSubcategoriesMap()[category];
+    return Array.isArray(list) ? list : [];
+}
 function getCurrentUser() { return store.user; }
 function getAllOrders() { return store.allOrders; }
 function getMessages() { return store.messages; }
@@ -164,6 +190,7 @@ async function loadStoreData({ silent = false } = {}) {
             store.categories = Array.isArray(storeData.categories) ? storeData.categories : [];
             store.sizeCategories = Array.isArray(storeData.sizeCategories) ? storeData.sizeCategories : [];
             store.colorCategories = Array.isArray(storeData.colorCategories) ? storeData.colorCategories : [];
+            store.subcategories = storeData.subcategories && typeof storeData.subcategories === 'object' ? storeData.subcategories : {};
             if (appReady && typeof refreshView === 'function') refreshView();
             return;
         } catch (error) {
@@ -215,9 +242,20 @@ async function loadUserCollections(user) {
         } catch (error) {
             console.warn('Could not load admin stats:', error);
         }
+        try {
+            const mediaData = await apiRequest('/api/admin/media-status');
+            store.mediaStatus = {
+                cloudinaryConfigured: Boolean(mediaData.cloudinaryConfigured),
+                cloudName: String(mediaData.cloudName || ''),
+                legacyPhotoCount: Number(mediaData.legacyPhotoCount) || 0
+            };
+        } catch {
+            // Optional endpoint on older remote servers
+        }
     } else {
         store.messages = [];
         store.adminStats = { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 };
+        store.mediaStatus = { cloudinaryConfigured: false, cloudName: '', legacyPhotoCount: 0 };
     }
 }
 
@@ -491,7 +529,7 @@ function productCard(product) {
     const idleText = needsOptions ? 'Select Options' : 'Add to Cart';
     const safeId = escapeHtml(String(product.id));
     return `<article class="product-card">
-        <div class="product-image"><a href="#/product?id=${encodeURIComponent(product.id)}"><img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}"></a></div>
+        <div class="product-image"><a href="#/product?id=${encodeURIComponent(product.id)}"><img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" loading="lazy" decoding="async"></a></div>
         <div class="product-info">
             <div><h3 class="product-title">${escapeHtml(product.name)}</h3><p class="product-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</p>${bulkLineMarkup(product)}</div>
             <button class="btn btn-full${inCart ? ' is-added' : ''}" data-cart-id="${safeId}" data-original-text="${idleText}" onclick="addToCartFromButton('${safeId}')">${inCart ? 'Added to Cart ✓' : idleText}</button>
@@ -648,8 +686,8 @@ function renderProduct() {
     const inCart = isInCart(productId);
     app.innerHTML = `<div class="product-detail-container">
         <div class="detail-image">
-            <img id="detail-main-image" src="${escapeHtml(photos[0] || '')}" alt="${escapeHtml(product.name)}">
-            ${photos.length > 1 ? `<div class="gallery-thumbs">${photos.map((src, index) => `<button type="button" class="gallery-thumb${index === 0 ? ' is-active' : ''}" aria-label="Show photo ${index + 1} of ${photos.length}" onclick="showProductPhoto(${index})"><img src="${escapeHtml(src)}" alt=""></button>`).join('')}</div>` : ''}
+            <img id="detail-main-image" src="${escapeHtml(photos[0] || '')}" alt="${escapeHtml(product.name)}" decoding="async">
+            ${photos.length > 1 ? `<div class="gallery-thumbs">${photos.map((src, index) => `<button type="button" class="gallery-thumb${index === 0 ? ' is-active' : ''}" aria-label="Show photo ${index + 1} of ${photos.length}" onclick="showProductPhoto(${index})"><img src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>` : ''}
         </div>
         <div class="detail-info">
             <p class="eyebrow">${escapeHtml(product.category)}</p>
@@ -866,22 +904,146 @@ function renderAdmin(tab = 'overview') {
                 <div class="stat-card"><p>Website Visitors</p><div class="stat-val">${Number(stats.websiteVisitors) || 0}</div><small>${Number(stats.totalViews) || 0} total view${Number(stats.totalViews) === 1 ? '' : 's'}</small></div>
             </div>`;
     } else if (tab === 'inventory') {
-        content = `<h2 class="mb-20">Inventory Management</h2>
-            <section class="category-manager" aria-labelledby="category-manager-title">
-                <h3 id="category-manager-title">Product Categories</h3>
-                <form class="category-form" onsubmit="addCategory(event)">
-                    <label class="sr-only" for="new-category">New category name</label>
-                    <input id="new-category" placeholder="New category name" maxlength="40" required>
-                    <label class="category-variant-check"><input type="checkbox" id="new-category-size"> Needs size</label>
-                    <label class="category-variant-check"><input type="checkbox" id="new-category-color"> Needs color</label>
-                    <button class="btn" type="submit">Add Category</button>
-                </form>
-                <ul class="category-list">${categories.map(category => `<li><span>${escapeHtml(category)}</span>${[['size', 'Size', categoryNeedsSize(category)], ['color', 'Color', categoryNeedsColor(category)]].map(([option, label, on]) => `<button type="button" class="category-toggle${on ? ' is-on' : ''}" aria-pressed="${on}" aria-label="${label} option for ${escapeHtml(category)}: ${on ? 'on' : 'off'}" data-category="${escapeHtml(category)}" data-option="${option}" onclick="toggleCategoryOption(this)">${label}: ${on ? 'On' : 'Off'}</button>`).join('')}<button type="button" class="remove-btn" aria-label="Remove ${escapeHtml(category)} category" data-category="${escapeHtml(category)}" onclick="removeCategory(this)">Remove</button></li>`).join('')}</ul>
-            </section>
+        const subMap = getSubcategoriesMap();
+        const totalSubcategories = Object.values(subMap).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0);
+        const categorySummary = `${categories.length} ${categories.length === 1 ? 'category' : 'categories'}${totalSubcategories ? ` · ${totalSubcategories} ${totalSubcategories === 1 ? 'subcategory' : 'subcategories'}` : ''}`;
+        const viewIsGrid = inventoryViewMode === 'grid';
+        const inventoryItemsMarkup = viewIsGrid
+            ? `<div class="inventory-grid">${products.map(product => {
+                const safeId = escapeHtml(String(product.id));
+                const catPath = product.subcategory ? `${escapeHtml(product.category)} / ${escapeHtml(product.subcategory)}` : escapeHtml(product.category || 'Uncategorized');
+                return `<article class="inventory-grid-card">
+                    <div class="inventory-grid-media">
+                        <img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" loading="lazy" decoding="async">
+                    </div>
+                    <div class="inventory-grid-body">
+                        <p class="inventory-grid-meta">${catPath}</p>
+                        <h3 class="inventory-grid-title">${escapeHtml(product.name)}</h3>
+                        <div class="inventory-grid-price">
+                            <span class="inventory-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</span>
+                            ${hasBulk(product) ? `<small class="inventory-bulk-note">${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}
+                        </div>
+                        <div class="inventory-grid-actions">
+                            <button type="button" class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button>
+                            <button type="button" class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button>
+                        </div>
+                    </div>
+                </article>`;
+            }).join('')}</div>`
+            : `<div class="table-wrap"><table><thead><tr><th>ID</th><th>Photo</th><th>Product</th><th>Category</th><th>Price</th><th>Actions</th></tr></thead><tbody>${products.map(product => {
+                const safeId = escapeHtml(String(product.id));
+                const catPath = product.subcategory ? `${escapeHtml(product.category)} <span class="cat-sep">/</span> ${escapeHtml(product.subcategory)}` : escapeHtml(product.category);
+                return `<tr><td>${safeId}</td><td><img class="inventory-thumb" src="${escapeHtml(product.image)}" alt="" loading="lazy" decoding="async"></td><td>${escapeHtml(product.name)}</td><td>${catPath}</td><td><span class="inventory-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</span>${hasBulk(product) ? `<br><small>${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}</td><td><div class="inventory-actions"><button class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button><button class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button></div></td></tr>`;
+            }).join('')}</tbody></table></div>`;
+
+        content = `<div class="inventory-topbar">
+                <div class="inventory-title-group">
+                    <h2>Inventory Management</h2>
+                    <span class="inventory-count">${products.length} ${products.length === 1 ? 'product' : 'products'} · ${categorySummary}</span>
+                </div>
+                <div class="inventory-view-toggle" role="group" aria-label="Inventory layout view">
+                    <button type="button" class="inventory-view-btn${!viewIsGrid ? ' is-active' : ''}" aria-pressed="${!viewIsGrid}" onclick="setInventoryView('list')">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                        <span>List</span>
+                    </button>
+                    <button type="button" class="inventory-view-btn${viewIsGrid ? ' is-active' : ''}" aria-pressed="${viewIsGrid}" onclick="setInventoryView('grid')">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                        <span>Grid</span>
+                    </button>
+                </div>
+            </div>
             <div class="inventory-add-wrap">
                 <button type="button" class="btn" onclick="openProductModal()">+ Add Product</button>
+                <button type="button" class="btn btn-outline inventory-dir-btn" onclick="renderAdmin('categories')">
+                    <span>Categories &amp; Subcategories</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+                </button>
+                ${store.mediaStatus?.cloudinaryConfigured && store.mediaStatus?.legacyPhotoCount > 0 ? `<button type="button" class="btn btn-outline" onclick="migratePhotosToCloudinary(this)">Move ${store.mediaStatus.legacyPhotoCount} Photos to Cloudinary</button>` : ''}
             </div>
-            <div class="table-wrap"><table><thead><tr><th>ID</th><th>Photo</th><th>Product</th><th>Category</th><th>Price</th><th>Actions</th></tr></thead><tbody>${products.map(product => { const safeId = escapeHtml(String(product.id)); return `<tr><td>${safeId}</td><td><img class="inventory-thumb" src="${escapeHtml(product.image)}" alt=""></td><td>${escapeHtml(product.name)}</td><td>${escapeHtml(product.category)}</td><td><span class="inventory-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</span>${hasBulk(product) ? `<br><small>${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}</td><td><div class="inventory-actions"><button class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button><button class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button></div></td></tr>`; }).join('')}</tbody></table></div>`;
+            ${products.length ? inventoryItemsMarkup : '<p class="empty-msg">No products in your inventory yet. Click "+ Add Product" to create your first item.</p>'}`;
+    } else if (tab === 'categories') {
+        const subMap = getSubcategoriesMap();
+        const totalSubcategories = Object.values(subMap).reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0);
+        const categoryCounts = new Map();
+        products.forEach(p => {
+            const key = p.category || '';
+            categoryCounts.set(key, (categoryCounts.get(key) || 0) + 1);
+        });
+        content = `<div class="categories-page-head">
+                <button type="button" class="btn btn-outline btn-small categories-back-btn" onclick="renderAdmin('inventory')">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6 6-6-6 6-6"/></svg>
+                    <span>Back to Inventory</span>
+                </button>
+                <div class="inventory-title-group">
+                    <h2>Categories &amp; Subcategories</h2>
+                    <span class="inventory-count">${categories.length} ${categories.length === 1 ? 'category' : 'categories'} · ${totalSubcategories} ${totalSubcategories === 1 ? 'subcategory' : 'subcategories'}</span>
+                </div>
+            </div>
+            <div class="category-forms-grid">
+                <section class="category-form-card" aria-labelledby="add-cat-heading">
+                    <h3 id="add-cat-heading">Add Category</h3>
+                    <form class="category-stack-form" onsubmit="addCategory(event)">
+                        <div class="form-group">
+                            <label for="new-category">Category Name</label>
+                            <input id="new-category" placeholder="e.g. Footwear, Electronics" maxlength="40" required>
+                        </div>
+                        <div class="category-checks-row">
+                            <label class="category-variant-check"><input type="checkbox" id="new-category-size"> Default Size option</label>
+                            <label class="category-variant-check"><input type="checkbox" id="new-category-color"> Default Color option</label>
+                        </div>
+                        <button class="btn" type="submit">Add Category</button>
+                    </form>
+                </section>
+                <section class="category-form-card" aria-labelledby="add-subcat-heading">
+                    <h3 id="add-subcat-heading">Add Subcategory</h3>
+                    <form class="category-stack-form" onsubmit="addSubcategory(event)">
+                        <div class="form-group">
+                            <label for="subcategory-parent">Parent Category</label>
+                            <select id="subcategory-parent" required>
+                                ${categories.length ? categories.map(cat => `<option value="${escapeHtml(cat)}">${escapeHtml(cat)}</option>`).join('') : '<option value="">Add a category first</option>'}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="new-subcategory">Subcategory Name</label>
+                            <input id="new-subcategory" placeholder="e.g. Sneakers, Phone Chargers" maxlength="50" ${categories.length ? 'required' : 'disabled'}>
+                        </div>
+                        <button class="btn" type="submit" ${categories.length ? '' : 'disabled'}>Add Subcategory</button>
+                    </form>
+                </section>
+            </div>
+            <div class="category-directory-list">
+                ${categories.length ? categories.map(category => {
+                    const subs = getSubcategoriesFor(category);
+                    const prodCount = categoryCounts.get(category) || 0;
+                    const safeCat = escapeHtml(category);
+                    return `<article class="category-directory-card">
+                        <div class="category-directory-head">
+                            <div class="category-directory-info">
+                                <h3>${safeCat}</h3>
+                                <span class="category-directory-meta">${prodCount} ${prodCount === 1 ? 'product' : 'products'} · ${subs.length} ${subs.length === 1 ? 'subcategory' : 'subcategories'}</span>
+                            </div>
+                            <div class="category-directory-controls">
+                                ${[['size', 'Size', categoryNeedsSize(category)], ['color', 'Color', categoryNeedsColor(category)]].map(([option, label, on]) => `<button type="button" class="category-toggle${on ? ' is-on' : ''}" aria-pressed="${on}" aria-label="${label} option for ${safeCat}: ${on ? 'on' : 'off'}" data-category="${safeCat}" data-option="${option}" onclick="toggleCategoryOption(this)">${label}: ${on ? 'On' : 'Off'}</button>`).join('')}
+                                <button type="button" class="remove-btn" aria-label="Remove ${safeCat} category" data-category="${safeCat}" onclick="removeCategory(this)">Remove</button>
+                            </div>
+                        </div>
+                        <div class="subcategory-section">
+                            ${subs.length ? `<ul class="subcategory-items">${subs.map(sub => {
+                                const safeSub = escapeHtml(sub);
+                                return `<li class="subcategory-item">
+                                    <span>${safeSub}</span>
+                                    <button type="button" class="subcategory-remove-btn" aria-label="Remove subcategory ${safeSub}" data-category="${safeCat}" data-subcategory="${safeSub}" onclick="removeSubcategory(this)">×</button>
+                                </li>`;
+                            }).join('')}</ul>` : '<p class="subcategory-empty">No subcategories yet.</p>'}
+                            <form class="subcategory-inline-form" data-category="${safeCat}" onsubmit="addInlineSubcategory(event, this)">
+                                <label class="sr-only">Add subcategory to ${safeCat}</label>
+                                <input type="text" placeholder="Add subcategory under ${safeCat}…" maxlength="50" required>
+                                <button type="submit" class="btn btn-outline btn-small">Add</button>
+                            </form>
+                        </div>
+                    </article>`;
+                }).join('') : '<p class="empty-msg">No categories created yet. Add your first category above.</p>'}
+            </div>`;
     } else if (tab === 'contacts') {
         content = contactsMarkup(getMessages());
     } else if (tab === 'reports') {
@@ -917,6 +1079,7 @@ function renderAdmin(tab = 'overview') {
             icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>'
         }
     ];
+    const activeAdminNav = tab === 'categories' ? 'inventory' : tab;
     app.innerHTML = `<div class="admin-page">
         <div class="admin-header">
             <span class="admin-header-badge">Admin Dashboard</span>
@@ -928,7 +1091,7 @@ function renderAdmin(tab = 'overview') {
         <section>${content}</section>
         <nav class="admin-bottom-nav" aria-label="Admin sections">
             <div class="admin-bottom-nav-inner">
-                ${adminNavItems.map(item => `<button type="button" class="admin-bottom-item${tab === item.key ? ' is-active' : ''}" aria-current="${tab === item.key ? 'page' : 'false'}" onclick="renderAdmin('${item.key}')">
+                ${adminNavItems.map(item => `<button type="button" class="admin-bottom-item${activeAdminNav === item.key ? ' is-active' : ''}" aria-current="${activeAdminNav === item.key ? 'page' : 'false'}" onclick="renderAdmin('${item.key}')">
                     <span class="admin-bottom-icon">
                         ${item.icon}
                         ${item.badge ? `<span class="admin-bottom-badge" aria-label="${item.badge} unread">${item.badge > 99 ? '99+' : item.badge}</span>` : ''}
@@ -941,6 +1104,7 @@ function renderAdmin(tab = 'overview') {
     app.append(document.getElementById('tpl-product-modal').content.cloneNode(true));
     // Category choices come from the data, so they are filled in here.
     document.getElementById('p-category').innerHTML = categories.map(category => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join('');
+    syncProductSubcategoryOptions();
 }
 
 // How many units of an order item were sold / unavailable / still unmarked.
@@ -1215,7 +1379,7 @@ function renderPage() {
     }
     const pages = {
         home: renderHome, search: renderSearch, product: renderProduct,
-        login: showLoginPage, register: () => showTemplate('tpl-register'),
+        login: showLoginPage, register: showRegisterPage,
         'forgot-password': () => showTemplate('tpl-forgot-password'),
         'reset-password': () => showTemplate('tpl-reset-password'),
         cart: renderCart,
@@ -1405,11 +1569,107 @@ function showAuthNotice(elementId, message, isError = false) {
     el.hidden = false;
 }
 
+async function loadAuthProviders() {
+    if (store.authProviders.loaded) return store.authProviders;
+    try {
+        const data = await apiRequest('/api/auth/providers');
+        store.authProviders = {
+            googleEnabled: Boolean(data?.googleEnabled && data?.googleClientId),
+            googleClientId: String(data?.googleClientId || ''),
+            loaded: true
+        };
+    } catch {
+        store.authProviders = { googleEnabled: false, googleClientId: '', loaded: true };
+    }
+    return store.authProviders;
+}
+
+function loadGoogleIdentityScript() {
+    if (window.google?.accounts?.id) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        const existing = document.querySelector('script[data-google-gsi="1"]');
+        if (existing) {
+            existing.addEventListener('load', () => resolve(), { once: true });
+            existing.addEventListener('error', () => reject(new Error('Could not load Google Sign-In.')), { once: true });
+            return;
+        }
+        const script = document.createElement('script');
+        script.src = 'https://accounts.google.com/gsi/client';
+        script.async = true;
+        script.defer = true;
+        script.dataset.googleGsi = '1';
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('Could not load Google Sign-In.'));
+        document.head.appendChild(script);
+    });
+}
+
+async function syncGoogleAuthUi(mode) {
+    const providers = await loadAuthProviders();
+    const wrap = document.getElementById(`${mode}-google-wrap`);
+    const subtitle = document.getElementById(`${mode}-subtitle`);
+    if (!providers.googleEnabled) {
+        if (wrap) wrap.hidden = true;
+        return;
+    }
+    if (wrap) wrap.hidden = false;
+    if (subtitle) {
+        subtitle.textContent = mode === 'login'
+            ? 'Choose Google or your email and password to access your account.'
+            : 'Register with Google or create an email and password account.';
+    }
+}
+
+async function triggerGoogleAuth(mode = 'login') {
+    const noticeId = mode === 'register' ? 'register-notice' : 'login-notice';
+    showAuthNotice(noticeId, '');
+    const providers = await loadAuthProviders();
+    if (!providers.googleEnabled || !providers.googleClientId) {
+        showAuthNotice(noticeId, 'Google Sign-In is not configured on this server yet.', true);
+        return;
+    }
+    try {
+        await loadGoogleIdentityScript();
+        window.google.accounts.id.initialize({
+            client_id: providers.googleClientId,
+            callback: async (response) => {
+                if (!response?.credential) {
+                    showAuthNotice(noticeId, 'Google sign-in was cancelled.', true);
+                    return;
+                }
+                try {
+                    const data = await apiRequest('/api/auth/google', {
+                        method: 'POST',
+                        body: { credential: response.credential }
+                    });
+                    setAuthToken(data.token);
+                    store.user = data.user;
+                    authSettled = true;
+                    await loadUserCollections(store.user);
+                    location.hash = postLoginHash(store.user);
+                    if (appReady && typeof renderPage === 'function') renderPage();
+                } catch (err) {
+                    showAuthNotice(noticeId, authErrorMessage(err), true);
+                }
+            }
+        });
+        window.google.accounts.id.prompt();
+    } catch (error) {
+        showAuthNotice(noticeId, error.message || 'Could not start Google Sign-In.', true);
+    }
+}
+
 function showLoginPage() {
     showTemplate('tpl-login');
     if (loginNotice) {
         showAuthNotice('login-notice', loginNotice, false);
     }
+    syncGoogleAuthUi('login');
+}
+
+function showRegisterPage() {
+    showTemplate('tpl-register');
+    syncGoogleAuthUi('register');
 }
 
 async function handleLogin(event) {
@@ -1439,12 +1699,21 @@ async function handleRegister(event) {
     const name = document.getElementById('reg-name').value.trim();
     const email = document.getElementById('reg-email').value.trim();
     const password = document.getElementById('reg-password').value;
+    const confirmPassword = document.getElementById('reg-confirm-password')?.value ?? password;
+    if (password.length < 6) {
+        showAuthNotice('register-notice', 'Password must be at least 6 characters.', true);
+        return;
+    }
+    if (password !== confirmPassword) {
+        showAuthNotice('register-notice', 'Passwords do not match. Please re-enter your password.', true);
+        return;
+    }
     try {
         await apiRequest('/api/auth/register', {
             method: 'POST',
             body: { name, email, password }
         });
-        loginNotice = 'Registration successful! Please login.';
+        loginNotice = 'Registration successful! Please sign in.';
         location.hash = '#/login';
     } catch (error) {
         showAuthNotice('register-notice', authErrorMessage(error), true);
@@ -1643,19 +1912,31 @@ function categoryNeedsColor(category) {
     return getColorCategories().includes(category);
 }
 
-async function saveCategories(categories, sizeCategories = getSizeCategories(), colorCategories = getColorCategories()) {
+async function saveCategories(
+    categories,
+    sizeCategories = getSizeCategories(),
+    colorCategories = getColorCategories(),
+    subcategories = getSubcategoriesMap()
+) {
+    const cleanSubs = {};
+    for (const cat of categories) {
+        const list = Array.isArray(subcategories?.[cat]) ? subcategories[cat].filter(Boolean) : [];
+        if (list.length) cleanSubs[cat] = list;
+    }
     try {
         const data = await apiRequest('/api/admin/categories', {
             method: 'PUT',
             body: {
                 list: categories,
                 sizeCategories: sizeCategories.filter(category => categories.includes(category)),
-                colorCategories: colorCategories.filter(category => categories.includes(category))
+                colorCategories: colorCategories.filter(category => categories.includes(category)),
+                subcategories: cleanSubs
             }
         });
         store.categories = Array.isArray(data.categories) ? data.categories : categories;
         store.sizeCategories = Array.isArray(data.sizeCategories) ? data.sizeCategories : [];
         store.colorCategories = Array.isArray(data.colorCategories) ? data.colorCategories : [];
+        store.subcategories = data.subcategories && typeof data.subcategories === 'object' ? data.subcategories : cleanSubs;
         return true;
     } catch (error) {
         console.warn(error);
@@ -1668,17 +1949,75 @@ async function addCategory(event) {
     event.preventDefault();
     const input = document.getElementById('new-category');
     const name = input.value.trim();
+    if (!name) return;
     const categories = getCategories();
     if (categories.some(category => category.toLowerCase() === name.toLowerCase())) {
         showToast('That category already exists.', 'error');
         return;
     }
     categories.push(name);
-    const sizeCategories = document.getElementById('new-category-size').checked ? [...getSizeCategories(), name] : getSizeCategories();
-    const colorCategories = document.getElementById('new-category-color').checked ? [...getColorCategories(), name] : getColorCategories();
-    if (await saveCategories(categories, sizeCategories, colorCategories)) {
+    const sizeCategories = document.getElementById('new-category-size')?.checked ? [...getSizeCategories(), name] : getSizeCategories();
+    const colorCategories = document.getElementById('new-category-color')?.checked ? [...getColorCategories(), name] : getColorCategories();
+    if (await saveCategories(categories, sizeCategories, colorCategories, getSubcategoriesMap())) {
         showToast('Category added.', 'success');
-        renderAdmin('inventory');
+        renderAdmin(lastAdminTab === 'categories' ? 'categories' : 'inventory');
+    }
+}
+
+async function addSubcategory(event) {
+    event.preventDefault();
+    const parentSelect = document.getElementById('subcategory-parent');
+    const input = document.getElementById('new-subcategory');
+    const category = parentSelect?.value.trim() || '';
+    const name = input?.value.trim() || '';
+    if (!category) {
+        showToast('Select a parent category first.', 'error');
+        return;
+    }
+    if (!name) return;
+    await saveNewSubcategory(category, name);
+}
+
+async function addInlineSubcategory(event, form) {
+    event.preventDefault();
+    const category = form?.dataset.category || '';
+    const input = form?.querySelector('input');
+    const name = input?.value.trim() || '';
+    if (!category || !name) return;
+    await saveNewSubcategory(category, name);
+}
+
+async function saveNewSubcategory(category, name) {
+    const categories = getCategories();
+    if (!categories.includes(category)) {
+        showToast('Parent category was not found.', 'error');
+        return;
+    }
+    const subMap = { ...getSubcategoriesMap() };
+    const existing = Array.isArray(subMap[category]) ? [...subMap[category]] : [];
+    if (existing.some(item => item.toLowerCase() === name.toLowerCase())) {
+        showToast('That subcategory already exists under this category.', 'error');
+        return;
+    }
+    existing.push(name);
+    subMap[category] = existing;
+    if (await saveCategories(categories, getSizeCategories(), getColorCategories(), subMap)) {
+        showToast(`Subcategory "${name}" added.`, 'success');
+        renderAdmin('categories');
+    }
+}
+
+async function removeSubcategory(button) {
+    const category = button.dataset.category || '';
+    const subcategory = button.dataset.subcategory || '';
+    if (!category || !subcategory) return;
+    const subMap = { ...getSubcategoriesMap() };
+    const nextList = (Array.isArray(subMap[category]) ? subMap[category] : []).filter(item => item !== subcategory);
+    if (nextList.length) subMap[category] = nextList;
+    else delete subMap[category];
+    if (await saveCategories(getCategories(), getSizeCategories(), getColorCategories(), subMap)) {
+        showToast('Subcategory removed.', 'success');
+        renderAdmin('categories');
     }
 }
 
@@ -1687,7 +2026,9 @@ async function toggleCategoryOption(button) {
     const flip = list => (list.includes(category) ? list.filter(item => item !== category) : [...list, category]);
     const sizeCategories = button.dataset.option === 'size' ? flip(getSizeCategories()) : getSizeCategories();
     const colorCategories = button.dataset.option === 'color' ? flip(getColorCategories()) : getColorCategories();
-    if (await saveCategories(getCategories(), sizeCategories, colorCategories)) renderAdmin('inventory');
+    if (await saveCategories(getCategories(), sizeCategories, colorCategories, getSubcategoriesMap())) {
+        renderAdmin(lastAdminTab === 'categories' ? 'categories' : 'inventory');
+    }
 }
 
 // Colors and sizes are optional for every product.
@@ -1707,9 +2048,11 @@ async function removeCategory(button) {
         return;
     }
     const categories = getSavedCategories().filter(item => item !== category);
-    if (await saveCategories(categories)) {
+    const subMap = { ...getSubcategoriesMap() };
+    delete subMap[category];
+    if (await saveCategories(categories, getSizeCategories(), getColorCategories(), subMap)) {
         showToast('Category removed.', 'success');
-        renderAdmin('inventory');
+        renderAdmin(lastAdminTab === 'categories' ? 'categories' : 'inventory');
     }
 }
 
@@ -1808,6 +2151,19 @@ async function addProductPhotos(event) {
     await task;
 }
 
+function syncProductSubcategoryOptions(selectedSubcategory = '') {
+    const category = document.getElementById('p-category')?.value || '';
+    const subSelect = document.getElementById('p-subcategory');
+    if (!subSelect) return;
+    const subs = [...getSubcategoriesFor(category)];
+    const cleanSelected = String(selectedSubcategory || '').trim();
+    if (cleanSelected && !subs.includes(cleanSelected)) {
+        subs.push(cleanSelected);
+    }
+    subSelect.innerHTML = `<option value="">None (optional)</option>${subs.map(sub => `<option value="${escapeHtml(sub)}">${escapeHtml(sub)}</option>`).join('')}`;
+    subSelect.value = cleanSelected;
+}
+
 function syncVariantFields() {
     const colorField = document.getElementById('color-field');
     const sizeField = document.getElementById('size-field');
@@ -1842,6 +2198,7 @@ function openProductModal(productId = null) {
     categorySelect.value = [...categorySelect.options].some(option => option.value === wantedCategory)
         ? wantedCategory
         : (categorySelect.options[0]?.value ?? '');
+    syncProductSubcategoryOptions(product?.subcategory || '');
     document.getElementById('p-desc').value = product?.description || '';
     document.getElementById('p-colors').value = (product?.options?.Color || []).join(', ');
     document.getElementById('p-sizes').value = (product?.options?.Size || []).join(', ');
@@ -1980,7 +2337,10 @@ async function saveNewProduct(event) {
     }
     try {
         // Older photos saved at a larger size are shrunk so all photos fit cleanly.
-        const photos = await Promise.all(modalPhotos.map(src => src.length > PHOTO_BUDGET ? compressImage(src) : src));
+        const photos = await Promise.all(
+            modalPhotos.map(src => (src.startsWith('data:image/') && src.length > PHOTO_BUDGET ? compressImage(src) : src))
+        );
+        const subcategory = (document.getElementById('p-subcategory')?.value || '').trim();
         const product = {
             id: existingIndex >= 0 ? products[existingIndex].id : Date.now(),
             name: document.getElementById('p-name').value.trim(),
@@ -1990,6 +2350,7 @@ async function saveNewProduct(event) {
             category,
             description: document.getElementById('p-desc').value.trim()
         };
+        if (subcategory) product.subcategory = subcategory;
         if (promoPrice !== null) product.promoPrice = promoPrice;
         if (bulk) Object.assign(product, bulk);
         if (Object.keys(built.options).length) product.options = built.options;
@@ -2062,12 +2423,32 @@ window.addEventListener('hashchange', () => {
     if (appReady) renderPage();
 });
 
+async function migratePhotosToCloudinary(button) {
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Moving photos to Cloudinary…';
+    }
+    try {
+        const result = await apiRequest('/api/admin/migrate-photos', { method: 'POST' });
+        store.mediaStatus.legacyPhotoCount = Number(result?.remainingLegacy) || 0;
+        await loadStoreData({ silent: true });
+        showToast(`Moved ${result?.uploadedPhotos || 0} photos across ${result?.migratedProducts || 0} products to Cloudinary!`, 'success');
+        renderAdmin('inventory');
+    } catch (error) {
+        showToast(error.message || 'Could not migrate photos to Cloudinary.', 'error');
+        if (button) {
+            button.disabled = false;
+            button.textContent = `Move ${store.mediaStatus?.legacyPhotoCount || ''} Photos to Cloudinary`;
+        }
+    }
+}
+
 setInterval(async () => {
     if (!appReady || document.visibilityState !== 'visible') return;
     await loadStoreData({ silent: true });
     if (store.user) await loadUserCollections(store.user);
     refreshView();
-}, 15000);
+}, 60000);
 
 function trackSiteVisit() {
     if (routeInfo().page === 'admin') return;

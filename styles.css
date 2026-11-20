@@ -2121,8 +2121,8 @@ body {
 .bottom-nav-inner {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-    width: min(560px, 100%);
+    gap: 6px;
+    width: min(600px, 100%);
     margin: 0 auto;
 }
 
@@ -2814,6 +2814,8 @@ footer.site-footer {
 
 .inventory-add-wrap {
     display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
     justify-content: flex-start;
     margin: 0 0 18px;
 }
@@ -2948,7 +2950,636 @@ body.is-admin-view .admin-page {
     .stats-grid.inventory-stats .stat-val {
         font-size: 1.65rem;
     }
+
+    .bottom-nav-label {
+        font-size: .7rem;
+    }
 }
+
+/* =====================================================================
+   Redesigned Auth Forms (Segmented Login / Register Card)
+   ===================================================================== */
+.auth-stage {
+    padding: clamp(20px, 4vw, 44px) 0;
+}
+
+.form-container.auth-form {
+    width: min(440px, 100%);
+    padding: 32px 26px 26px;
+    background: rgba(24, 23, 21, .94);
+    border: 1px solid rgba(255, 138, 36, .34);
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+}
+
+.auth-close {
+    top: 16px;
+    right: 16px;
+    width: 34px;
+    height: 34px;
+    padding: 7px;
+    background: rgba(255, 255, 255, .04);
+    border: 1px solid rgba(255, 255, 255, .14);
+}
+
+.auth-title {
+    margin: 0 0 8px;
+    padding: 0 28px;
+    text-align: center;
+    font-size: clamp(1.45rem, 1.25rem + .8vw, 1.8rem);
+    font-weight: 800;
+    letter-spacing: -.015em;
+    color: #ffffff;
+}
+
+.auth-subtitle {
+    max-width: 34ch;
+    margin: 0 auto 20px;
+    text-align: center;
+    color: #a8a196;
+    font-size: .92rem;
+    line-height: 1.48;
+}
+
+.auth-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    padding: 4px;
+    margin-bottom: 18px;
+    background: #100f0d;
+    border: 1px solid rgba(255, 255, 255, .09);
+    border-radius: 10px;
+}
+
+.auth-tab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 8px 12px;
+    color: #c8c1b7;
+    border-radius: 7px;
+    font-size: .92rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background-color .18s ease, color .18s ease;
+}
+
+.auth-tab:hover,
+.auth-tab:focus-visible {
+    color: #ffffff;
+    outline: none;
+}
+
+.auth-tab.is-active {
+    color: #17120d;
+    background: var(--accent-orange);
+    font-weight: 700;
+}
+
+.auth-social-wrap {
+    margin-bottom: 16px;
+}
+
+.auth-google-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 16px;
+    color: #ffffff;
+    background: rgba(255, 255, 255, .03);
+    border: 1px solid rgba(255, 255, 255, .18);
+    border-radius: 9px;
+    font: inherit;
+    font-size: .94rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color .18s ease, background-color .18s ease;
+}
+
+.auth-google-btn:hover,
+.auth-google-btn:focus-visible {
+    border-color: var(--accent-orange);
+    background: rgba(255, 138, 36, .08);
+    outline: none;
+}
+
+.auth-google-icon {
+    width: 18px;
+    height: 18px;
+    color: var(--accent-orange);
+    flex-shrink: 0;
+}
+
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 18px 0 4px;
+    color: #8f887d;
+    font-size: .74rem;
+    font-weight: 600;
+    letter-spacing: .08em;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: rgba(255, 255, 255, .1);
+}
+
+.auth-fields-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.auth-form .auth-fields-form .form-group {
+    margin-bottom: 0;
+}
+
+.auth-form .auth-fields-form label {
+    display: block;
+    margin-bottom: 6px;
+    color: #e6dfd5;
+    font-size: .88rem;
+    font-weight: 600;
+}
+
+.auth-label-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+
+.auth-form .auth-label-row label {
+    margin-bottom: 0;
+}
+
+.auth-forgot-link {
+    color: var(--accent-orange);
+    font-size: .84rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.auth-forgot-link:hover,
+.auth-forgot-link:focus-visible {
+    text-decoration: underline;
+    outline: none;
+}
+
+.auth-form .auth-fields-form input {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 13px;
+    color: #ffffff;
+    background: #12110f;
+    border: 1px solid rgba(255, 255, 255, .13);
+    border-radius: 9px;
+    font-size: .94rem;
+    transition: border-color .18s ease, box-shadow .18s ease;
+}
+
+.auth-form .auth-fields-form input::placeholder {
+    color: #7b756c;
+}
+
+.auth-form .auth-fields-form input:focus {
+    border-color: var(--accent-orange);
+    box-shadow: 0 0 0 3px rgba(255, 138, 36, .16);
+    outline: none;
+}
+
+.auth-form .auth-fields-form .password-field input {
+    padding-right: 44px;
+}
+
+.auth-submit-btn {
+    min-height: 46px;
+    margin-top: 4px;
+    border-radius: 10px;
+    font-size: .96rem;
+    font-weight: 700;
+}
+
+.auth-footer {
+    margin: 20px 0 0;
+    text-align: center;
+    color: #a8a196;
+    font-size: .88rem;
+}
+
+.auth-footer-link {
+    color: var(--accent-orange);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.auth-footer-link:hover,
+.auth-footer-link:focus-visible {
+    text-decoration: underline;
+    outline: none;
+}
+
+@media (max-width: 480px) {
+    .form-container.auth-form {
+        padding: 26px 18px 22px;
+    }
+}
+
+/* =====================================================================
+   Admin Inventory Topbar, Grid/List View & Categories Directory Page
+   ===================================================================== */
+.inventory-topbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 16px;
+}
+
+.inventory-title-group {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.inventory-title-group h2 {
+    margin: 0;
+}
+
+.inventory-count {
+    color: #a8a196;
+    font-size: .86rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.inventory-view-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    background: #11100e;
+    border: 1px solid var(--border-color);
+    border-radius: 9px;
+}
+
+.inventory-view-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 36px;
+    padding: 6px 12px;
+    color: #b7b0a6;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    font: inherit;
+    font-size: .84rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color .16s ease, color .16s ease;
+}
+
+.inventory-view-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2;
+}
+
+.inventory-view-btn:hover,
+.inventory-view-btn:focus-visible {
+    color: #ffffff;
+    outline: none;
+}
+
+.inventory-view-btn.is-active {
+    color: #17120d;
+    background: var(--accent-orange);
+    font-weight: 700;
+}
+
+.inventory-dir-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.inventory-dir-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.2;
+}
+
+.cat-sep {
+    color: #7c756c;
+    margin: 0 3px;
+}
+
+/* Inventory Grid View */
+.inventory-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 16px;
+}
+
+.inventory-grid-card {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    transition: border-color .18s ease, transform .18s cubic-bezier(.16, 1, .3, 1);
+}
+
+.inventory-grid-card:hover {
+    border-color: rgba(255, 138, 36, .45);
+    transform: translateY(-2px);
+}
+
+.inventory-grid-media {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    background: #11100e;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.inventory-grid-media img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.inventory-grid-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 8px;
+    padding: 14px;
+}
+
+.inventory-grid-meta {
+    margin: 0;
+    color: #a8a196;
+    font-size: .78rem;
+    letter-spacing: .02em;
+}
+
+.inventory-grid-title {
+    margin: 0;
+    color: #ffffff;
+    font-size: .98rem;
+    font-weight: 700;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.inventory-grid-price {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-variant-numeric: tabular-nums;
+}
+
+.inventory-bulk-note {
+    color: #a8a196;
+    font-size: .78rem;
+}
+
+.inventory-grid-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, .07);
+}
+
+.inventory-grid-actions .btn {
+    flex: 1;
+}
+
+/* Dedicated Categories & Subcategories Directory Page */
+.categories-page-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 20px;
+}
+
+.categories-back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.categories-back-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.2;
+}
+
+.category-forms-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin-bottom: 22px;
+}
+
+.category-form-card {
+    padding: 18px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+}
+
+.category-form-card h3 {
+    margin: 0 0 14px;
+    font-size: 1.05rem;
+    color: #ffffff;
+}
+
+.category-stack-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.category-stack-form .form-group {
+    margin-bottom: 0;
+}
+
+.category-checks-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+}
+
+.category-directory-list {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.category-directory-card {
+    padding: 18px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+}
+
+.category-directory-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, .08);
+}
+
+.category-directory-info h3 {
+    margin: 0 0 2px;
+    font-size: 1.06rem;
+    color: #ffffff;
+}
+
+.category-directory-meta {
+    color: #a8a196;
+    font-size: .82rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.category-directory-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.subcategory-section {
+    padding-top: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.subcategory-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.subcategory-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    color: #eae4dc;
+    background: #12110f;
+    border: 1px solid rgba(255, 255, 255, .1);
+    border-radius: 8px;
+    font-size: .86rem;
+}
+
+.subcategory-remove-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    color: #b7b0a6;
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.subcategory-remove-btn:hover,
+.subcategory-remove-btn:focus-visible {
+    color: #ff6b6b;
+    background: rgba(255, 107, 107, .12);
+    outline: none;
+}
+
+.subcategory-empty {
+    margin: 0;
+    color: #8f887d;
+    font-size: .86rem;
+}
+
+.subcategory-inline-form {
+    display: flex;
+    gap: 8px;
+    max-width: 420px;
+}
+
+.subcategory-inline-form input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 11px;
+    color: var(--text-color);
+    background: #12110f;
+    border: 1px solid var(--border-color);
+    border-radius: 7px;
+    font-size: .88rem;
+}
+
+@media (max-width: 720px) {
+    .category-forms-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .inventory-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+
+    .inventory-grid-body {
+        padding: 10px;
+    }
+}
+
+
+
 
 
 
