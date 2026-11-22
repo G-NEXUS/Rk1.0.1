@@ -32,7 +32,9 @@ import firebaseConfig from '../firebase-applet-config.json';
 const ADMIN_EMAIL = 'choolwechingobe2@gmail.com';
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+const db = firebaseConfig.firestoreDatabaseId
+  ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+  : getFirestore(app);
 const auth = getAuth(app);
 
 const OperationType = {
@@ -305,15 +307,6 @@ async function fetchStorefront() {
     handleFirestoreError(err, OperationType.GET, 'meta/categories');
   }
 
-  try {
-    const dykSnap = await getDocs(collection(db, 'didYouKnow'));
-    didYouKnow = dykSnap.docs
-      .map((d) => ({ ...d.data(), id: d.data()?.id || d.id }))
-      .sort((a, b) => (Number(a.createdAtMs) || 0) - (Number(b.createdAtMs) || 0));
-  } catch (err) {
-    handleFirestoreError(err, OperationType.LIST, 'didYouKnow');
-  }
-
   return { products, categories, sizeCategories, colorCategories, subcategories, didYouKnow };
 }
 
@@ -558,7 +551,13 @@ async function trackPageView({ type, targetId, label }) {
     });
   } catch (err) {
     const code = String(err?.code || '');
-    if (code === 'not-found' || String(err?.message || '').toLowerCase().includes('no document to update')) {
+    const msg = String(err?.message || '').toLowerCase();
+    if (
+      code === 'not-found' ||
+      code === 'permission-denied' ||
+      msg.includes('no document to update') ||
+      msg.includes('insufficient permissions')
+    ) {
       try {
         await setDoc(ref, {
           viewKey,

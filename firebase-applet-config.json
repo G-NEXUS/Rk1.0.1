@@ -1,12 +1,8 @@
 {
-  "projectId": "healthy-guru-d40px",
-  "appId": "1:3643702252:web:750d5f8b830d088e315ec9",
-  "apiKey": "AIzaSyC3Zwqt3qUo7tSmdR6bS1evFoxfUBtc6bI",
-  "authDomain": "healthy-guru-d40px.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-rk-ab9c0eaa-c485-4513-8470-ab8d2568b672",
-  "storageBucket": "healthy-guru-d40px.firebasestorage.app",
-  "messagingSenderId": "3643702252",
-  "measurementId": "",
-  "oAuthClientId": "3643702252-ua496vqsgqoaaqndasgpttfcavllvdop.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
+  "apiKey": "AIzaSyCHAemBi71qB9diMJ9--_IlnCt2mzc3cV4",
+  "authDomain": "rk-main-c7124.firebaseapp.com",
+  "projectId": "rk-main-c7124",
+  "storageBucket": "rk-main-c7124.firebasestorage.app",
+  "messagingSenderId": "31301974162",
+  "appId": "1:31301974162:web:c5ef6cd84e3e7ff2928e4b"
 }
