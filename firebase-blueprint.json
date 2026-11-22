@@ -1,0 +1,183 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "A storefront product item with pricing, category metadata, optional variants, and Cloudinary image URLs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "price": { "type": "number" },
+        "promoPrice": { "type": "number" },
+        "bulkPrice": { "type": "number" },
+        "bulkMinQty": { "type": "number" },
+        "image": { "type": "string", "maxLength": 2048 },
+        "gallery": { "type": "array" },
+        "category": { "type": "string", "maxLength": 80 },
+        "subcategory": { "type": "string", "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "options": { "type": "object" },
+        "sku": { "type": "string", "maxLength": 64 },
+        "createdAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "price", "image", "updatedAt"]
+    },
+    "CategoryMeta": {
+      "title": "CategoryMeta",
+      "description": "Storefront category list, per-category variant toggles, and subcategory mappings.",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "list": { "type": "array" },
+        "sizeCategories": { "type": "array" },
+        "colorCategories": { "type": "array" },
+        "subcategories": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["key", "list", "sizeCategories", "colorCategories", "subcategories", "updatedAt"]
+    },
+    "PageViewCounter": {
+      "title": "PageViewCounter",
+      "description": "Traffic counter tracking cumulative views for an individual product page or category page.",
+      "type": "object",
+      "properties": {
+        "viewKey": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["product", "category", "site"] },
+        "targetId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "views": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["viewKey", "type", "targetId", "label", "views", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Customer or admin account profile stored in Firestore.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "isAdmin": { "type": "boolean" },
+        "migratedFromMongo": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "email", "isAdmin", "createdAt", "updatedAt"]
+    },
+    "UserCredentials": {
+      "title": "UserCredentials",
+      "description": "Migrated bcrypt password hash and legacy authentication metadata isolated in a private subcollection.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "passwordHash": { "type": "string", "minLength": 10, "maxLength": 255 },
+        "migratedFromMongo": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "passwordHash", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer storefront order placed via WhatsApp checkout.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "customer": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 254 },
+        "date": { "type": "string", "maxLength": 64 },
+        "items": { "type": "array" },
+        "total": { "type": "number" },
+        "status": { "type": "string", "enum": ["Awaiting WhatsApp confirmation", "Confirmed", "Delivered", "Unavailable", "Cancelled"] },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "uid", "customer", "items", "total", "status", "createdAt", "updatedAt"]
+    },
+    "ContactMessage": {
+      "title": "ContactMessage",
+      "description": "Customer inquiry submitted from the storefront contact form.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "read": { "type": "boolean" },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "email", "subject", "message", "read", "createdAt"]
+    },
+    "DidYouKnowItem": {
+      "title": "DidYouKnowItem",
+      "description": "Promotional or informational card displayed on the storefront.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "image": { "type": "string", "maxLength": 2048 },
+        "badge": { "type": "string", "maxLength": 64 },
+        "link": { "type": "string", "maxLength": 1024 },
+        "createdAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "updatedAt"]
+    },
+    "AdminMarker": {
+      "title": "AdminMarker",
+      "description": "Admin role assignment document keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Publicly readable storefront product documents managed by admins."
+    },
+    "/meta/{metaId}": {
+      "schema": { "$ref": "#/entities/CategoryMeta" },
+      "description": "Storefront categories, variant category toggles, and subcategories."
+    },
+    "/pageViews/{viewKey}": {
+      "schema": { "$ref": "#/entities/PageViewCounter" },
+      "description": "Per-product and per-category page view counters readable by admins."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Customer and admin account profiles isolated by owner UID or admin."
+    },
+    "/users/{userId}/private/{credId}": {
+      "schema": { "$ref": "#/entities/UserCredentials" },
+      "description": "Migrated MongoDB password hashes isolated inside owner/admin-only private subcollection."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Customer orders isolated by owner UID or admin."
+    },
+    "/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ContactMessage" },
+      "description": "Contact form messages readable and manageable only by admins."
+    },
+    "/didYouKnow/{itemId}": {
+      "schema": { "$ref": "#/entities/DidYouKnowItem" },
+      "description": "Publicly readable informational cards managed by admins."
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminMarker" },
+      "description": "Admin role lookup collection."
+    }
+  }
+}

@@ -654,6 +654,24 @@ async function updateUserName(uid, name) {
   return normalizeUser(updated);
 }
 
+async function listAllUsersWithCredentials() {
+  if (!isMongoReady()) {
+    return (Array.isArray(memoryStore.users) ? memoryStore.users : [])
+      .map((u) => {
+        const norm = normalizeUser(u);
+        return norm ? { ...norm, createdAtMs: Number(u.createdAtMs) || Date.now() } : null;
+      })
+      .filter(Boolean);
+  }
+  const docs = await User.find({}).lean();
+  return docs
+    .map((doc) => {
+      const norm = normalizeUser(doc);
+      return norm ? { ...norm, createdAtMs: Number(doc.createdAtMs) || Date.now() } : null;
+    })
+    .filter(Boolean);
+}
+
 // ---------- Orders ----------
 async function listOrders(user) {
   if (!isMongoReady()) {
@@ -988,6 +1006,7 @@ module.exports = {
   saveCategoriesMeta,
   findUserByEmail,
   findUserByUid,
+  listAllUsersWithCredentials,
   createUser,
   updateUserName,
   listOrders,

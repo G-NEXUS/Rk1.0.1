@@ -6,16 +6,23 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "build": "node --check server.js && node --check db.js && node --check cloudinary.js && node --check common.js && node --check api/index.js && node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});for(const f of ['index.html','styles.css','common.js'])fs.copyFileSync(f,'public/'+f);\"",
-    "lint": "node --check server.js && node --check db.js && node --check cloudinary.js && node --check common.js && node --check api/index.js"
+    "build": "node --check server.js && node --check db.js && node --check cloudinary.js && node --check common.js && node --check api/index.js && npx esbuild src/firebase-client.js --bundle --format=iife --outfile=firebase-bundle.js --minify && npx vite build && node -e \"const fs=require('fs');fs.mkdirSync('public',{recursive:true});for(const f of ['index.html','styles.css','common.js','firebase-bundle.js'])fs.copyFileSync(f,'public/'+f);fs.writeFileSync('public/.nojekyll','');\"",
+    "lint": "node --check server.js && node --check db.js && node --check cloudinary.js && node --check common.js && node --check api/index.js && node --check vite.config.js && npx eslint firestore.rules"
   },
   "engines": {
     "node": ">=20.x"
   },
   "dependencies": {
+    "@firebase/eslint-plugin-security-rules": "^0.0.2",
     "bcryptjs": "^3.0.3",
     "dotenv": "^18.0.10",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.15.0",
     "express": "^4.21.2",
+    "firebase": "^13.4.0",
     "mongoose": "^9.12.2"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
   }
 }

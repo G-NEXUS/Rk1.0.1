@@ -27,6 +27,15 @@ const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || DEFAULT_ADMIN_EMAIL).trim(
 const GOOGLE_CLIENT_ID = String(process.env.GOOGLE_CLIENT_ID || '').trim();
 const tokenCache = new Map();
 
+const fs = require('fs');
+let FIREBASE_WEB_CONFIG = null;
+try {
+  FIREBASE_WEB_CONFIG = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'firebase-applet-config.json'), 'utf8'));
+} catch {
+  FIREBASE_WEB_CONFIG = null;
+}
+const firebaseTokenCache = new Map();
+
 const BLOCKED_FILES = new Set([
   '/server.js',
   '/db.js',
@@ -38,6 +47,15 @@ const BLOCKED_FILES = new Set([
   '/metadata.json',
   '/pasted_content.txt',
   '/README.md',
+  '/firebase-applet-config.json',
+  '/firebase-blueprint.json',
+  '/firestore.rules',
+  '/firestore.rules.test.ts',
+  '/security_spec.md',
+  '/eslint.config.mjs',
+  '/vite.config.js',
+  '/vite.config.ts',
+  '/src/firebase-client.js',
 ]);
 
 app.use(express.json({ limit: '25mb' }));
@@ -136,6 +154,42 @@ function verifyToken(token) {
   }
 }
 
+async function verifyFirebaseIdToken(idToken) {
+  if (!idToken || !FIREBASE_WEB_CONFIG?.apiKey) return null;
+  const cached = firebaseTokenCache.get(idToken);
+  if (cached && cached.exp > Date.now()) {
+    return cached.user;
+  }
+  try {
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_WEB_CONFIG.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => ({}));
+    const fbUser = Array.isArray(data?.users) ? data.users[0] : null;
+    if (!fbUser || !fbUser.localId) return null;
+    const email = String(fbUser.email || '').trim().toLowerCase();
+    const emailVerified = fbUser.emailVerified === true;
+    const user = {
+      uid: String(fbUser.localId),
+      name: String(fbUser.displayName || email.split('@')[0] || 'User'),
+      email,
+      emailVerified,
+      isAdmin: Boolean(ADMIN_EMAIL && email === ADMIN_EMAIL && emailVerified),
+      authProvider: 'firebase',
+    };
+    firebaseTokenCache.set(idToken, { user, exp: Date.now() + 5 * 60 * 1000 });
+    return user;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveUserFromRequest(req) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
@@ -154,13 +208,21 @@ async function resolveUserFromRequest(req) {
     }
   }
 
-  // 2. Check token cache (for upstream tokens)
+  // 2. Check token cache (for upstream or Firebase tokens)
   const cached = tokenCache.get(token);
   if (cached && cached.exp > Date.now()) {
     return cached.user;
   }
 
-  // 3. If upstream proxy is active, verify token via upstream /api/auth/me
+  // 3. Check Firebase ID Token (Auth issued by Firebase project)
+  if (token.split('.').length === 3 && FIREBASE_WEB_CONFIG?.apiKey) {
+    const fbUser = await verifyFirebaseIdToken(token);
+    if (fbUser) {
+      return fbUser;
+    }
+  }
+
+  // 4. If upstream proxy is active, verify token via upstream /api/auth/me
   if (useUpstreamProxy()) {
     try {
       const meRes = await fetchUpstream('/api/auth/me', {
@@ -451,6 +513,102 @@ app.post('/api/admin/migrate-photos', async (req, res, next) => {
       migratedProducts,
       uploadedPhotos,
       remainingLegacy: media.countLegacyPhotos(freshProducts),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ---------- Cloudinary Direct Photo Upload for Firestore Catalog ----------
+app.post('/api/media/upload', async (req, res, next) => {
+  try {
+    const user = await resolveUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required.' });
+    if (!user.isAdmin) return res.status(403).json({ error: 'Admin access required.' });
+
+    const dataUri = String(req.body?.dataUri || '');
+    const productId = String(req.body?.productId || 'prod').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const index = Number.parseInt(req.body?.index, 10) || 0;
+    if (!dataUri) {
+      return res.status(400).json({ error: 'Missing image data.' });
+    }
+    if (!media.isDataImageUri(dataUri)) {
+      return res.json({ url: dataUri, cloudinary: dataUri.includes('res.cloudinary.com') });
+    }
+    if (!media.isCloudinaryConfigured()) {
+      return res.status(400).json({
+        code: 'media/cloudinary-not-configured',
+        error: 'Cloudinary is not configured yet. Add CLOUDINARY_URL in Secrets or Vercel environment variables to upload new product photos.',
+      });
+    }
+    const pubId = `prod_${productId}_${index}_${Date.now()}`;
+    const secureUrl = await media.uploadDataUriToCloudinary(dataUri, { publicId: pubId });
+    return res.json({ url: secureUrl, cloudinary: true });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ---------- MongoDB -> Firebase Migration Export Endpoints ----------
+app.get('/api/admin/mongodb-status', async (req, res, next) => {
+  try {
+    const user = await resolveUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required.' });
+    if (!user.isAdmin) return res.status(403).json({ error: 'Admin access required.' });
+
+    if (!db.isMongoReady()) {
+      return res.json({ available: false, products: 0, categories: 0, users: 0, orders: 0, messages: 0 });
+    }
+    const [products, meta, users, orders, messages, didYouKnow] = await Promise.all([
+      db.listProducts(),
+      db.getCategoriesMeta(),
+      db.listAllUsersWithCredentials(),
+      db.listOrders({ isAdmin: true }),
+      db.listMessages(),
+      db.listDidYouKnow(),
+    ]);
+    return res.json({
+      available: true,
+      products: products.length,
+      categories: meta.list.length,
+      users: users.length,
+      orders: orders.length,
+      messages: messages.length,
+      didYouKnow: didYouKnow.length,
+      cloudinaryConfigured: media.isCloudinaryConfigured(),
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+app.get('/api/admin/mongodb-export', async (req, res, next) => {
+  try {
+    const user = await resolveUserFromRequest(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required.' });
+    if (!user.isAdmin) return res.status(403).json({ error: 'Admin access required.' });
+    if (!db.isMongoReady()) {
+      return res.status(404).json({ error: 'MongoDB is not connected on this server.' });
+    }
+    const [products, meta, users, orders, messages, didYouKnow, stats] = await Promise.all([
+      db.listProducts(),
+      db.getCategoriesMeta(),
+      db.listAllUsersWithCredentials(),
+      db.listOrders({ isAdmin: true }),
+      db.listMessages(),
+      db.listDidYouKnow(),
+      db.getAdminStats(),
+    ]);
+    media.registerProductsList(products);
+    return res.json({
+      products,
+      meta,
+      users,
+      orders,
+      messages,
+      didYouKnow,
+      analytics: stats,
+      cloudinaryConfigured: media.isCloudinaryConfigured(),
     });
   } catch (err) {
     return next(err);
@@ -1231,6 +1389,13 @@ app.get('/styles.css', (req, res) => {
 app.get('/common.js', (req, res) => {
   res.type('application/javascript; charset=utf-8');
   res.sendFile(path.join(ROOT_DIR, 'common.js'));
+});
+
+app.get('/firebase-bundle.js', (req, res) => {
+  res.type('application/javascript; charset=utf-8');
+  const pubBundle = path.join(ROOT_DIR, 'public', 'firebase-bundle.js');
+  const rootBundle = path.join(ROOT_DIR, 'firebase-bundle.js');
+  res.sendFile(fs.existsSync(pubBundle) ? pubBundle : rootBundle);
 });
 
 app.use(express.static(ROOT_DIR, { extensions: ['html'] }));

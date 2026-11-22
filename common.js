@@ -1,10 +1,16 @@
-// Shared storefront data (MongoDB via Express API) and cart helpers.
-// Products, categories, accounts, orders and messages live in MongoDB.
-// The shopping cart stays in this browser's localStorage, as before.
+// Shared storefront data (Firebase Firestore + Cloudinary photos + MongoDB migration fallback) and cart helpers.
 
 const AUTH_TOKEN_KEY = 'rk_auth_token';
 
-// In-memory copy of the data, kept fresh by the MongoDB API.
+function hasFirebase() {
+    return Boolean(typeof window !== 'undefined' && window.RKFirebase && window.RKFirebase.db && window.RKFirebase.auth);
+}
+
+function hasFirebaseUser() {
+    return Boolean(hasFirebase() && window.RKFirebase.auth.currentUser);
+}
+
+// In-memory copy of the data, kept fresh by Firebase Firestore.
 const store = {
     products: [],
     categories: [],
@@ -15,8 +21,13 @@ const store = {
     myOrders: [],       // signed-in customer's own orders
     messages: [],       // contact-form messages (admin only)
     adminStats: { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 },
+    pageViews: { siteViews: 0, totalProductViews: 0, totalCategoryViews: 0, productViews: [], categoryViews: [] },
+    mongoStatus: { available: false, products: 0, categories: 0, users: 0, orders: 0, messages: 0, didYouKnow: 0, cloudinaryConfigured: false },
+    needsMongoMigration: false,
+    migratingToFirebase: false,
+    migrationProgress: '',
     mediaStatus: { cloudinaryConfigured: false, cloudName: '', legacyPhotoCount: 0 },
-    authProviders: { googleEnabled: false, googleClientId: '', loaded: false },
+    authProviders: { googleEnabled: true, googleClientId: '', loaded: false },
     recentOrders: {},   // orders placed in this session
     user: null,         // { uid, name, email, isAdmin }
     loadError: false    // true when the product list could not be loaded
@@ -107,12 +118,39 @@ function setAuthToken(token) {
     }
 }
 
+function resolveAssetUrl(src) {
+    const value = String(src || '').trim();
+    if (!value) return '';
+    if (value.startsWith('/assets/')) return `.${value}`;
+    if (value.startsWith('/api/')) {
+        const apiBase = String((typeof window !== 'undefined' && window.RK_API_BASE) || '').replace(/\/+$/, '');
+        return apiBase ? `${apiBase}${value}` : `.${value}`;
+    }
+    return value;
+}
+
+function resolveApiUrl(url) {
+    const raw = String(url || '');
+    const apiBase = String((typeof window !== 'undefined' && window.RK_API_BASE) || '').replace(/\/+$/, '');
+    if (apiBase && raw.startsWith('/')) return `${apiBase}${raw}`;
+    if (raw.startsWith('/api/')) return `.${raw}`;
+    return raw;
+}
+
 async function apiRequest(url, options = {}) {
     const headers = { ...(options.headers || {}) };
     if (options.body !== undefined && !headers['Content-Type']) {
         headers['Content-Type'] = 'application/json';
     }
-    const token = getAuthToken();
+    let token = '';
+    if (hasFirebaseUser()) {
+        try {
+            token = await window.RKFirebase.getIdToken();
+        } catch {
+            token = '';
+        }
+    }
+    if (!token) token = getAuthToken();
     if (token) headers.Authorization = `Bearer ${token}`;
 
     const controller = new AbortController();
@@ -120,7 +158,7 @@ async function apiRequest(url, options = {}) {
 
     let response;
     try {
-        response = await fetch(url, {
+        response = await fetch(resolveApiUrl(url), {
             method: options.method || 'GET',
             headers,
             body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
@@ -181,6 +219,27 @@ function rememberOrder(order) {
 
 // ---------- Storefront sync ----------
 async function loadStoreData({ silent = false } = {}) {
+    if (hasFirebase()) {
+        try {
+            const fbData = await window.RKFirebase.fetchStorefront();
+            const hasFbData = (fbData.products && fbData.products.length > 0)
+                || (fbData.categories && fbData.categories.length > 0);
+            if (hasFbData) {
+                store.loadError = false;
+                store.needsMongoMigration = false;
+                store.products = Array.isArray(fbData.products) ? fbData.products : [];
+                store.categories = Array.isArray(fbData.categories) ? fbData.categories : [];
+                store.sizeCategories = Array.isArray(fbData.sizeCategories) ? fbData.sizeCategories : [];
+                store.colorCategories = Array.isArray(fbData.colorCategories) ? fbData.colorCategories : [];
+                store.subcategories = fbData.subcategories && typeof fbData.subcategories === 'object' ? fbData.subcategories : {};
+                if (appReady && typeof refreshView === 'function') refreshView();
+                return;
+            }
+        } catch (err) {
+            console.warn('[Firestore Storefront]', err?.message || err);
+        }
+    }
+
     let attempts = 2;
     while (attempts > 0) {
         try {
@@ -191,6 +250,7 @@ async function loadStoreData({ silent = false } = {}) {
             store.sizeCategories = Array.isArray(storeData.sizeCategories) ? storeData.sizeCategories : [];
             store.colorCategories = Array.isArray(storeData.colorCategories) ? storeData.colorCategories : [];
             store.subcategories = storeData.subcategories && typeof storeData.subcategories === 'object' ? storeData.subcategories : {};
+            store.needsMongoMigration = hasFirebase() && (store.products.length > 0 || store.categories.length > 0);
             if (appReady && typeof refreshView === 'function') refreshView();
             return;
         } catch (error) {
@@ -223,8 +283,69 @@ async function loadUserCollections(user) {
         store.allOrders = [];
         store.myOrders = [];
         store.messages = [];
+        store.adminStats = { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 };
+        store.pageViews = { siteViews: 0, totalProductViews: 0, totalCategoryViews: 0, productViews: [], categoryViews: [] };
+        store.mongoStatus = { available: false, products: 0, categories: 0, users: 0, orders: 0, messages: 0, didYouKnow: 0, cloudinaryConfigured: false };
         return;
     }
+
+    if (hasFirebaseUser()) {
+        try {
+            const orders = await window.RKFirebase.fetchOrders(user);
+            if (user.isAdmin) {
+                store.allOrders = Array.isArray(orders) ? orders : [];
+                store.myOrders = [];
+            } else {
+                store.myOrders = Array.isArray(orders) ? orders : [];
+                store.allOrders = [];
+            }
+        } catch (error) {
+            console.warn('Could not load Firestore orders:', error);
+        }
+
+        if (user.isAdmin) {
+            const [messagesRes, pageViewsRes, usersCountRes, statsRes, mongoRes, mediaRes] = await Promise.allSettled([
+                window.RKFirebase.fetchMessages(),
+                window.RKFirebase.fetchPageViews(),
+                window.RKFirebase.fetchRegisteredUsersCount(),
+                apiRequest('/api/admin/stats'),
+                apiRequest('/api/admin/mongodb-status'),
+                apiRequest('/api/admin/media-status')
+            ]);
+
+            if (messagesRes.status === 'fulfilled') {
+                store.messages = Array.isArray(messagesRes.value) ? messagesRes.value : [];
+            }
+            if (pageViewsRes.status === 'fulfilled' && pageViewsRes.value) {
+                store.pageViews = pageViewsRes.value;
+            }
+            const fbUsersCount = usersCountRes.status === 'fulfilled' ? Number(usersCountRes.value) || 0 : 0;
+            const apiStats = statsRes.status === 'fulfilled' ? statsRes.value : null;
+            const siteViews = Number(store.pageViews?.siteViews) || 0;
+            store.adminStats = {
+                registeredUsers: Math.max(fbUsersCount, Number(apiStats?.registeredUsers) || 0),
+                websiteVisitors: Number(apiStats?.websiteVisitors) || 0,
+                totalViews: Math.max(siteViews, Number(apiStats?.totalViews) || 0)
+            };
+            if (mongoRes.status === 'fulfilled' && mongoRes.value) {
+                store.mongoStatus = mongoRes.value;
+            }
+            if (mediaRes.status === 'fulfilled' && mediaRes.value) {
+                store.mediaStatus = {
+                    cloudinaryConfigured: Boolean(mediaRes.value.cloudinaryConfigured),
+                    cloudName: String(mediaRes.value.cloudName || ''),
+                    legacyPhotoCount: Number(mediaRes.value.legacyPhotoCount) || 0
+                };
+            }
+        } else {
+            store.messages = [];
+            store.adminStats = { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 };
+            store.pageViews = { siteViews: 0, totalProductViews: 0, totalCategoryViews: 0, productViews: [], categoryViews: [] };
+            store.mediaStatus = { cloudinaryConfigured: false, cloudName: '', legacyPhotoCount: 0 };
+        }
+        return;
+    }
+
     try {
         const ordersData = await apiRequest('/api/orders');
         const orders = Array.isArray(ordersData.orders) ? ordersData.orders : [];
@@ -256,6 +377,12 @@ async function loadUserCollections(user) {
             console.warn('Could not load admin stats:', error);
         }
         try {
+            const mongoData = await apiRequest('/api/admin/mongodb-status');
+            if (mongoData) store.mongoStatus = mongoData;
+        } catch {
+            // Optional
+        }
+        try {
             const mediaData = await apiRequest('/api/admin/media-status');
             store.mediaStatus = {
                 cloudinaryConfigured: Boolean(mediaData.cloudinaryConfigured),
@@ -263,7 +390,7 @@ async function loadUserCollections(user) {
                 legacyPhotoCount: Number(mediaData.legacyPhotoCount) || 0
             };
         } catch {
-            // Optional endpoint on older remote servers
+            // Optional endpoint
         }
     } else {
         store.messages = [];
@@ -310,25 +437,60 @@ async function syncSession({ redraw = false } = {}) {
     return store.user;
 }
 
-const authReady = syncSession({ redraw: true });
+const authReady = hasFirebase()
+    ? new Promise(resolve => {
+        let initialResolved = false;
+        window.RKFirebase.onAuthChange(async (fbProfile) => {
+            if (fbProfile) {
+                store.user = fbProfile;
+                authSettled = true;
+                await loadUserCollections(store.user);
+                if (!initialResolved) {
+                    initialResolved = true;
+                    resolve(store.user);
+                }
+                if (appReady && typeof renderPage === 'function') renderPage();
+            } else {
+                const legacyToken = getAuthToken();
+                if (legacyToken) {
+                    const user = await syncSession({ redraw: appReady });
+                    if (!initialResolved) {
+                        initialResolved = true;
+                        resolve(user);
+                    }
+                } else {
+                    store.user = null;
+                    await loadUserCollections(null);
+                    authSettled = true;
+                    if (!initialResolved) {
+                        initialResolved = true;
+                        resolve(null);
+                    }
+                    if (appReady && typeof renderPage === 'function') renderPage();
+                }
+            }
+        });
+    })
+    : syncSession({ redraw: true });
 
 // The shop waits only for the product list, never for login, so visitors who are not
-// logged in see the goods straight away. Allow up to 45 s for Render cold starts.
+// logged in see the goods straight away.
 const dataReady = Promise.race([
     loadStoreData(),
     new Promise(resolve => setTimeout(() => {
-        console.warn('Server is slow to respond; showing the shop with what has loaded.');
+        console.warn('Storefront is slow to respond; showing the shop with what has loaded.');
         resolve();
     }, 45000))
 ]);
 
-function logout() {
+async function logout() {
     setAuthToken('');
     store.user = null;
-    store.allOrders = [];
-    store.myOrders = [];
-    store.messages = [];
+    await loadUserCollections(null);
     document.body.classList.remove('is-admin-view');
+    if (hasFirebase()) {
+        await window.RKFirebase.logout().catch(() => {});
+    }
     apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
     window.location.hash = '#/home';
     if (appReady && typeof renderPage === 'function') renderPage();
@@ -484,7 +646,7 @@ function updateBottomNav(page) {
         activeKey = 'profile';
     } else if (page === 'search') {
         activeKey = 'search';
-    } else if (['home', 'product'].includes(page)) {
+    } else if (['home', 'product', 'category'].includes(page)) {
         activeKey = 'home';
     }
     document.querySelectorAll('.bottom-nav-item[data-nav]').forEach(item => {
@@ -542,7 +704,7 @@ function productCard(product) {
     const idleText = needsOptions ? 'Select Options' : 'Add to Cart';
     const safeId = escapeHtml(String(product.id));
     return `<article class="product-card">
-        <div class="product-image"><a href="#/product?id=${encodeURIComponent(product.id)}"><img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" loading="lazy" decoding="async"></a></div>
+        <div class="product-image"><a href="#/product?id=${encodeURIComponent(product.id)}"><img src="${escapeHtml(resolveAssetUrl(product.image))}" alt="${escapeHtml(product.name)}" loading="lazy" decoding="async"></a></div>
         <div class="product-info">
             <div><h3 class="product-title">${escapeHtml(product.name)}</h3><p class="product-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</p>${bulkLineMarkup(product)}</div>
             <button class="btn btn-full${inCart ? ' is-added' : ''}" data-cart-id="${safeId}" data-original-text="${idleText}" onclick="addToCartFromButton('${safeId}')">${inCart ? 'Added to Cart ✓' : idleText}</button>
@@ -593,16 +755,86 @@ function heroMarkup() {
     return result;
 }
 
+let lastTrackedViewSignature = '';
+
+function recordRouteView(type, targetId, label) {
+    if (!hasFirebase() || !type || !targetId) return;
+    const signature = `${type}:${String(targetId).toLowerCase()}`;
+    if (signature === lastTrackedViewSignature) return;
+    lastTrackedViewSignature = signature;
+    window.RKFirebase.trackPageView({ type, targetId: String(targetId), label: String(label || targetId) }).catch(() => {});
+}
+
 function renderHome() {
     const products = getProducts();
+    const categories = getCategories(products);
+    const categoryBar = categories.length
+        ? `<nav class="home-category-bar" aria-label="Shop by category">
+            <a href="#/home" class="home-cat-link is-active">All</a>
+            ${categories.map(cat => `<a href="#/category?name=${encodeURIComponent(cat)}" class="home-cat-link">${escapeHtml(cat)}</a>`).join('')}
+        </nav>`
+        : '';
     app.innerHTML = `${heroMarkup()}
     <section class="shop-section">
         <h2 class="section-title">Our Products</h2>
+        ${categoryBar}
         ${products.length
             ? productSectionsMarkup(products)
             : (store.loadError
                 ? '<div class="empty-state"><p>Products could not be loaded right now. Please check your connection or database configuration and try again.</p><button type="button" class="btn mt-20" onclick="retryLoadStore(this)">Retry Loading Products</button></div>'
                 : '<p>No products available yet.</p>')}
+    </section>`;
+}
+
+function renderCategory() {
+    const params = routeInfo().params;
+    const rawName = (params.get('name') || '').trim();
+    const activeSub = (params.get('sub') || '').trim();
+    const categories = getCategories();
+    const matchedCategory = categories.find(c => c.toLowerCase() === rawName.toLowerCase()) || rawName;
+
+    if (!matchedCategory) {
+        location.hash = '#/home';
+        return;
+    }
+
+    document.title = `${matchedCategory} | ${brand}`;
+    const allProducts = getProducts();
+    const inCategory = allProducts.filter(p => String(p.category || '').toLowerCase() === matchedCategory.toLowerCase());
+    const subs = getSubcategoriesFor(matchedCategory);
+    const filtered = activeSub
+        ? inCategory.filter(p => String(p.subcategory || '').toLowerCase() === activeSub.toLowerCase())
+        : inCategory;
+
+    recordRouteView('category', matchedCategory, matchedCategory);
+
+    const categoryNav = categories.length
+        ? `<nav class="home-category-bar" aria-label="Categories">
+            <a href="#/home" class="home-cat-link">All</a>
+            ${categories.map(cat => `<a href="#/category?name=${encodeURIComponent(cat)}" class="home-cat-link${cat.toLowerCase() === matchedCategory.toLowerCase() ? ' is-active' : ''}">${escapeHtml(cat)}</a>`).join('')}
+        </nav>`
+        : '';
+
+    const subBar = subs.length
+        ? `<div class="category-sub-bar" aria-label="Filter by subcategory">
+            <a href="#/category?name=${encodeURIComponent(matchedCategory)}" class="category-sub-link${!activeSub ? ' is-active' : ''}">All ${escapeHtml(matchedCategory)}</a>
+            ${subs.map(sub => `<a href="#/category?name=${encodeURIComponent(matchedCategory)}&sub=${encodeURIComponent(sub)}" class="category-sub-link${activeSub.toLowerCase() === sub.toLowerCase() ? ' is-active' : ''}">${escapeHtml(sub)}</a>`).join('')}
+        </div>`
+        : '';
+
+    app.innerHTML = `<section class="category-page">
+        <div class="category-page-head">
+            <div>
+                <a href="#/home" class="category-back-link">← All Products</a>
+                <h1 class="section-title">${escapeHtml(matchedCategory)}</h1>
+                <p class="category-page-count">${filtered.length} ${filtered.length === 1 ? 'product' : 'products'}</p>
+            </div>
+        </div>
+        ${categoryNav}
+        ${subBar}
+        ${filtered.length
+            ? `<div class="product-grid">${filtered.map(productCard).join('')}</div>`
+            : `<div class="empty-state"><p>No products found in ${escapeHtml(matchedCategory)}${activeSub ? ` / ${escapeHtml(activeSub)}` : ''} yet.</p><a href="#/home" class="btn mt-20">Browse All Products</a></div>`}
     </section>`;
 }
 
@@ -616,7 +848,7 @@ function searchResultsMarkup(query) {
         </div>`;
     }
     const normalizedQuery = trimmed.toLowerCase();
-    const matches = products.filter(product => [product.name, product.category, product.description]
+    const matches = products.filter(product => [product.name, product.category, product.subcategory, product.description]
         .some(value => String(value || '').toLowerCase().includes(normalizedQuery)));
     if (!matches.length) {
         return `<div class="text-center empty-state">
@@ -660,6 +892,10 @@ function renderSearch() {
     const query = routeInfo().params.get('q') || '';
     const categories = getCategories();
     const normalized = query.trim().toLowerCase();
+    const matchedCat = normalized ? categories.find(cat => cat.toLowerCase() === normalized) : '';
+    if (matchedCat) {
+        recordRouteView('category', matchedCat, matchedCat);
+    }
     app.innerHTML = `<section class="search-page">
         <h1 class="section-title">Search</h1>
         <div class="search-page-box">
@@ -697,17 +933,22 @@ function renderProduct() {
         return;
     }
     document.title = `${product.name} | ${brand}`;
+    recordRouteView('product', String(product.id), product.name);
     const photos = getProductPhotos(product);
     const productId = String(product.id);
     const safeId = escapeHtml(productId);
     const inCart = isInCart(productId);
+    const categoryText = escapeHtml(product.category || 'General');
+    const categoryLink = product.category
+        ? `<a class="detail-category-link" href="#/category?name=${encodeURIComponent(product.category)}">${categoryText}</a>${product.subcategory ? ` / ${escapeHtml(product.subcategory)}` : ''}`
+        : categoryText;
     app.innerHTML = `<div class="product-detail-container">
         <div class="detail-image">
-            <img id="detail-main-image" src="${escapeHtml(photos[0] || '')}" alt="${escapeHtml(product.name)}" decoding="async">
-            ${photos.length > 1 ? `<div class="gallery-thumbs">${photos.map((src, index) => `<button type="button" class="gallery-thumb${index === 0 ? ' is-active' : ''}" aria-label="Show photo ${index + 1} of ${photos.length}" onclick="showProductPhoto(${index})"><img src="${escapeHtml(src)}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>` : ''}
+            <img id="detail-main-image" src="${escapeHtml(resolveAssetUrl(photos[0] || ''))}" alt="${escapeHtml(product.name)}" decoding="async">
+            ${photos.length > 1 ? `<div class="gallery-thumbs">${photos.map((src, index) => `<button type="button" class="gallery-thumb${index === 0 ? ' is-active' : ''}" aria-label="Show photo ${index + 1} of ${photos.length}" onclick="showProductPhoto(${index})"><img src="${escapeHtml(resolveAssetUrl(src))}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>` : ''}
         </div>
         <div class="detail-info">
-            <p class="eyebrow">${escapeHtml(product.category)}</p>
+            <p class="eyebrow">${categoryLink}</p>
             <h1>${escapeHtml(product.name)}</h1>
             <p class="detail-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</p>
             ${hasBulk(product) ? `<p class="detail-bulk">Buy ${Number(product.bulkMinQty)} or more: <strong>${formatMoney(product.bulkPrice)}</strong> each</p>` : ''}
@@ -739,7 +980,7 @@ function renderCart() {
                 return `<article class="cart-row">
                     <div class="cart-row-main">
                         <div class="cart-product">
-                            <img src="${escapeHtml(item.image)}" alt="${escapeHtml(item.name)}" class="cart-product-image">
+                            <img src="${escapeHtml(resolveAssetUrl(item.image))}" alt="${escapeHtml(item.name)}" class="cart-product-image">
                             <div class="cart-product-details">
                                 <h2 class="cart-product-name">${escapeHtml(item.name)}</h2>
                                 <p class="cart-unit-price">${formatMoney(unitPrice)} <span>each</span>${bulkApplies(item, cart) ? ' <span class="bulk-tag">Bulk price</span>' : ''}</p>
@@ -911,13 +1152,82 @@ function renderAdmin(tab = 'overview') {
         const summary = summarizeOrders(uniqueOrders);
         const sales = summary.made;
         const stats = store.adminStats || { registeredUsers: 0, websiteVisitors: 0, totalViews: 0 };
+        const pv = store.pageViews || { siteViews: 0, totalProductViews: 0, totalCategoryViews: 0, productViews: [], categoryViews: [] };
+        const mongo = store.mongoStatus || {};
+
+        const prodViewMap = new Map((pv.productViews || []).map(v => [String(v.targetId), Number(v.views) || 0]));
+        const productViewRows = products
+            .map(p => ({
+                id: String(p.id),
+                name: p.name,
+                category: p.category || 'Uncategorized',
+                image: p.image,
+                views: prodViewMap.get(String(p.id)) || 0
+            }))
+            .sort((a, b) => b.views - a.views || a.name.localeCompare(b.name));
+
+        const catViewMap = new Map((pv.categoryViews || []).map(v => [String(v.targetId).toLowerCase(), Number(v.views) || 0]));
+        const categoryViewRows = categories
+            .map(cat => ({
+                name: cat,
+                count: products.filter(p => String(p.category || '').toLowerCase() === cat.toLowerCase()).length,
+                views: catViewMap.get(cat.toLowerCase()) || 0
+            }))
+            .sort((a, b) => b.views - a.views || a.name.localeCompare(b.name));
+
+        const migrationCard = mongo.available
+            ? `<div class="migration-card">
+                <div class="migration-card-info">
+                    <h3>MongoDB → Firebase Migration</h3>
+                    <p>${store.needsMongoMigration
+                        ? `Ready to migrate ${mongo.products} products, ${mongo.categories} categories, ${mongo.users} user accounts (with passwords), ${mongo.orders} orders &amp; ${mongo.messages} messages into Firebase.`
+                        : `Firebase is active (${products.length} products loaded). You can re-sync from MongoDB (${mongo.products} products, ${mongo.users} accounts) anytime.`}
+                        ${mongo.cloudinaryConfigured ? ' Cloudinary is connected for photos.' : ' Add CLOUDINARY_URL in secrets to move photos onto Cloudinary.'}
+                    </p>
+                    ${store.migrationProgress ? `<p class="migration-progress">${escapeHtml(store.migrationProgress)}</p>` : ''}
+                </div>
+                <button type="button" class="btn" ${store.migratingToFirebase ? 'disabled' : ''} onclick="runMongoToFirebaseMigration(this)">
+                    ${store.migratingToFirebase ? 'Migrating…' : (store.needsMongoMigration ? 'Migrate All Data to Firebase' : 'Re-sync MongoDB → Firebase')}
+                </button>
+            </div>`
+            : '';
+
         content = `<h2 class="mb-20">Store Overview</h2>
+            ${migrationCard}
             <div class="stats-grid overview-stats">
                 <div class="stat-card stat-card-featured"><p>Total Sales</p><div class="stat-val">${formatMoney(sales)}</div><small>${formatMoney(summary.made)} sold · ${formatMoney(summary.pending)} pending (unavailable excluded)</small></div>
                 <div class="stat-card"><p>Inventory</p><div class="stat-val">${products.length}</div></div>
                 <div class="stat-card"><p>Total Orders</p><div class="stat-val">${uniqueOrders.length}</div></div>
                 <div class="stat-card"><p>Registered Users</p><div class="stat-val">${Number(stats.registeredUsers) || 0}</div></div>
                 <div class="stat-card"><p>Website Visitors</p><div class="stat-val">${Number(stats.websiteVisitors) || 0}</div><small>${Number(stats.totalViews) || 0} total view${Number(stats.totalViews) === 1 ? '' : 's'}</small></div>
+                <div class="stat-card"><p>Product Page Views</p><div class="stat-val">${Number(pv.totalProductViews) || 0}</div><small>${(pv.productViews || []).length} viewed product${(pv.productViews || []).length === 1 ? '' : 's'}</small></div>
+                <div class="stat-card"><p>Category Page Views</p><div class="stat-val">${Number(pv.totalCategoryViews) || 0}</div><small>${(pv.categoryViews || []).length} viewed categor${(pv.categoryViews || []).length === 1 ? 'y' : 'ies'}</small></div>
+            </div>
+            <div class="admin-views-grid">
+                <section class="admin-views-card" aria-label="Category page view counts">
+                    <div class="admin-views-head">
+                        <h3>Category Page Views</h3>
+                        <span>${categoryViewRows.length} categor${categoryViewRows.length === 1 ? 'y' : 'ies'}</span>
+                    </div>
+                    ${categoryViewRows.length
+                        ? `<ul class="views-list">${categoryViewRows.map(row => `<li class="views-row">
+                            <a href="#/category?name=${encodeURIComponent(row.name)}" class="views-row-name">${escapeHtml(row.name)} <small>(${row.count} items)</small></a>
+                            <span class="views-count-badge">${row.views} view${row.views === 1 ? '' : 's'}</span>
+                        </li>`).join('')}</ul>`
+                        : '<p class="form-hint">No categories yet.</p>'}
+                </section>
+                <section class="admin-views-card" aria-label="Product page view counts">
+                    <div class="admin-views-head">
+                        <h3>Product Page Views</h3>
+                        <span>Top ${Math.min(productViewRows.length, 25)} of ${productViewRows.length}</span>
+                    </div>
+                    ${productViewRows.length
+                        ? `<ul class="views-list">${productViewRows.slice(0, 25).map(row => `<li class="views-row">
+                            <a href="#/product?id=${encodeURIComponent(row.id)}" class="views-row-name">${escapeHtml(row.name)} <small>${escapeHtml(row.category)}</small></a>
+                            <span class="views-count-badge">${row.views} view${row.views === 1 ? '' : 's'}</span>
+                        </li>`).join('')}</ul>`
+                        : '<p class="form-hint">No products yet.</p>'}
+                </section>
             </div>`;
     } else if (tab === 'inventory') {
         const subMap = getSubcategoriesMap();
@@ -930,7 +1240,7 @@ function renderAdmin(tab = 'overview') {
                 const catPath = product.subcategory ? `${escapeHtml(product.category)} / ${escapeHtml(product.subcategory)}` : escapeHtml(product.category || 'Uncategorized');
                 return `<article class="inventory-grid-card">
                     <div class="inventory-grid-media">
-                        <img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" loading="lazy" decoding="async">
+                        <img src="${escapeHtml(resolveAssetUrl(product.image))}" alt="${escapeHtml(product.name)}" loading="lazy" decoding="async">
                     </div>
                     <div class="inventory-grid-body">
                         <p class="inventory-grid-meta">${catPath}</p>
@@ -949,7 +1259,7 @@ function renderAdmin(tab = 'overview') {
             : `<div class="table-wrap"><table><thead><tr><th>ID</th><th>Photo</th><th>Product</th><th>Category</th><th>Price</th><th>Actions</th></tr></thead><tbody>${products.map(product => {
                 const safeId = escapeHtml(String(product.id));
                 const catPath = product.subcategory ? `${escapeHtml(product.category)} <span class="cat-sep">/</span> ${escapeHtml(product.subcategory)}` : escapeHtml(product.category);
-                return `<tr><td>${safeId}</td><td><img class="inventory-thumb" src="${escapeHtml(product.image)}" alt="" loading="lazy" decoding="async"></td><td>${escapeHtml(product.name)}</td><td>${catPath}</td><td><span class="inventory-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</span>${hasBulk(product) ? `<br><small>${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}</td><td><div class="inventory-actions"><button class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button><button class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button></div></td></tr>`;
+                return `<tr><td>${safeId}</td><td><img class="inventory-thumb" src="${escapeHtml(resolveAssetUrl(product.image))}" alt="" loading="lazy" decoding="async"></td><td>${escapeHtml(product.name)}</td><td>${catPath}</td><td><span class="inventory-price${hasPromo(product) ? ' has-promo' : ''}">${priceDisplayMarkup(product)}</span>${hasBulk(product) ? `<br><small>${formatMoney(product.bulkPrice)} for ${Number(product.bulkMinQty)}+</small>` : ''}</td><td><div class="inventory-actions"><button class="btn btn-outline btn-small" onclick="openProductModal('${safeId}')">Edit</button><button class="remove-btn" onclick="deleteProduct('${safeId}')">Delete</button></div></td></tr>`;
             }).join('')}</tbody></table></div>`;
 
         content = `<div class="inventory-topbar">
@@ -1167,12 +1477,18 @@ function orderTrackingMarkup(orders) {
 async function saveOrderItems(order, items) {
     const reportedAtMs = Date.now();
     try {
-        const data = await apiRequest(`/api/orders/${encodeURIComponent(order.id)}`, {
-            method: 'PUT',
-            body: { items, reportedAtMs }
-        });
-        const nextOrder = data?.order || { ...order, items, reportedAtMs };
-        store.allOrders = store.allOrders.map(entry => entry.id === order.id ? nextOrder : entry);
+        if (hasFirebaseUser()) {
+            const updated = await window.RKFirebase.updateOrderItems(order.id, items);
+            const nextOrder = { ...order, items: updated?.items || items, status: updated?.status || order.status, reportedAtMs };
+            store.allOrders = store.allOrders.map(entry => entry.id === order.id ? nextOrder : entry);
+        } else {
+            const data = await apiRequest(`/api/orders/${encodeURIComponent(order.id)}`, {
+                method: 'PUT',
+                body: { items, reportedAtMs }
+            });
+            const nextOrder = data?.order || { ...order, items, reportedAtMs };
+            store.allOrders = store.allOrders.map(entry => entry.id === order.id ? nextOrder : entry);
+        }
     } catch (error) {
         console.warn(error);
         showToast('The order could not be updated. Check your connection and admin access.', 'error');
@@ -1300,12 +1616,18 @@ async function sendContactMessage(event) {
         uid: user?.uid || null
     };
     try {
-        const data = await Promise.race([
-            apiRequest('/api/messages', { method: 'POST', body: message }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Sending timed out.')), 8000))
-        ]);
-        if (user?.isAdmin && data?.message) {
-            store.messages = [...store.messages, data.message];
+        let savedMessage = null;
+        if (hasFirebase()) {
+            savedMessage = await window.RKFirebase.sendContactMessage(message);
+        } else {
+            const data = await Promise.race([
+                apiRequest('/api/messages', { method: 'POST', body: message }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Sending timed out.')), 8000))
+            ]);
+            savedMessage = data?.message || message;
+        }
+        if (user?.isAdmin && savedMessage) {
+            store.messages = [...store.messages, savedMessage];
         }
     } catch (error) {
         console.warn(error);
@@ -1336,11 +1658,16 @@ function contactsMarkup(messages) {
 
 async function setMessageRead(id, read) {
     try {
-        const data = await apiRequest(`/api/messages/${encodeURIComponent(id)}`, {
-            method: 'PATCH',
-            body: { read }
-        });
-        store.messages = store.messages.map(item => item.id === id ? (data?.message || { ...item, read: Boolean(read) }) : item);
+        if (hasFirebaseUser()) {
+            await window.RKFirebase.updateMessageRead(id, read);
+            store.messages = store.messages.map(item => item.id === id ? { ...item, read: Boolean(read) } : item);
+        } else {
+            const data = await apiRequest(`/api/messages/${encodeURIComponent(id)}`, {
+                method: 'PATCH',
+                body: { read }
+            });
+            store.messages = store.messages.map(item => item.id === id ? (data?.message || { ...item, read: Boolean(read) }) : item);
+        }
     } catch (error) {
         console.warn(error);
         showToast('The message could not be updated. Check your connection and admin access.', 'error');
@@ -1351,7 +1678,11 @@ async function setMessageRead(id, read) {
 async function deleteMessage(id) {
     if (!(await askConfirm('Delete this message?'))) return;
     try {
-        await apiRequest(`/api/messages/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (hasFirebaseUser()) {
+            await window.RKFirebase.deleteMessage(id);
+        } else {
+            await apiRequest(`/api/messages/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        }
         store.messages = store.messages.filter(item => item.id !== id);
         showToast('Message deleted.', 'success');
     } catch (error) {
@@ -1393,8 +1724,11 @@ function renderPage() {
         requireLogin('#/checkout', 'Please log in or register to place your order.');
         return;
     }
+    if (!['product', 'category', 'search'].includes(page)) {
+        lastTrackedViewSignature = '';
+    }
     const pages = {
-        home: renderHome, search: renderSearch, product: renderProduct,
+        home: renderHome, category: renderCategory, search: renderSearch, product: renderProduct,
         login: showLoginPage, register: showRegisterPage,
         'forgot-password': () => showTemplate('tpl-forgot-password'),
         'reset-password': () => showTemplate('tpl-reset-password'),
@@ -1533,6 +1867,12 @@ function authErrorMessage(error) {
         case 'auth/user-not-found':
         case 'auth/invalid-email':
             return 'Invalid email or password.';
+        case 'auth/operation-not-allowed':
+            return 'Email/Password sign-in is not enabled in Firebase Authentication yet. Use Google Sign-In above, or enable Email/Password in your Firebase Console.';
+        case 'auth/popup-closed-by-user':
+            return 'Google sign-in was cancelled.';
+        case 'auth/popup-blocked':
+            return 'Your browser blocked the Google sign-in popup. Please allow popups for this site and try again.';
         case 'auth/password-reset-required':
             return 'This account needs a password reset before logging in. Use Forgot Password below to set a new password.';
         case 'auth/invalid-reset-token':
@@ -1586,6 +1926,10 @@ function showAuthNotice(elementId, message, isError = false) {
 }
 
 async function loadAuthProviders() {
+    if (hasFirebase()) {
+        store.authProviders = { googleEnabled: true, googleClientId: '', loaded: true };
+        return store.authProviders;
+    }
     if (store.authProviders.loaded) return store.authProviders;
     try {
         const data = await apiRequest('/api/auth/providers');
@@ -1598,26 +1942,6 @@ async function loadAuthProviders() {
         store.authProviders = { googleEnabled: false, googleClientId: '', loaded: true };
     }
     return store.authProviders;
-}
-
-function loadGoogleIdentityScript() {
-    if (window.google?.accounts?.id) return Promise.resolve();
-    return new Promise((resolve, reject) => {
-        const existing = document.querySelector('script[data-google-gsi="1"]');
-        if (existing) {
-            existing.addEventListener('load', () => resolve(), { once: true });
-            existing.addEventListener('error', () => reject(new Error('Could not load Google Sign-In.')), { once: true });
-            return;
-        }
-        const script = document.createElement('script');
-        script.src = 'https://accounts.google.com/gsi/client';
-        script.async = true;
-        script.defer = true;
-        script.dataset.googleGsi = '1';
-        script.onload = () => resolve();
-        script.onerror = () => reject(new Error('Could not load Google Sign-In.'));
-        document.head.appendChild(script);
-    });
 }
 
 async function syncGoogleAuthUi(mode) {
@@ -1639,39 +1963,23 @@ async function syncGoogleAuthUi(mode) {
 async function triggerGoogleAuth(mode = 'login') {
     const noticeId = mode === 'register' ? 'register-notice' : 'login-notice';
     showAuthNotice(noticeId, '');
-    const providers = await loadAuthProviders();
-    if (!providers.googleEnabled || !providers.googleClientId) {
-        showAuthNotice(noticeId, 'Google Sign-In is not configured on this server yet.', true);
+    if (!hasFirebase()) {
+        showAuthNotice(noticeId, 'Firebase Authentication is loading. Please try again in a moment.', true);
         return;
     }
     try {
-        await loadGoogleIdentityScript();
-        window.google.accounts.id.initialize({
-            client_id: providers.googleClientId,
-            callback: async (response) => {
-                if (!response?.credential) {
-                    showAuthNotice(noticeId, 'Google sign-in was cancelled.', true);
-                    return;
-                }
-                try {
-                    const data = await apiRequest('/api/auth/google', {
-                        method: 'POST',
-                        body: { credential: response.credential }
-                    });
-                    setAuthToken(data.token);
-                    store.user = data.user;
-                    authSettled = true;
-                    await loadUserCollections(store.user);
-                    location.hash = postLoginHash(store.user);
-                    if (appReady && typeof renderPage === 'function') renderPage();
-                } catch (err) {
-                    showAuthNotice(noticeId, authErrorMessage(err), true);
-                }
-            }
-        });
-        window.google.accounts.id.prompt();
+        const profile = await window.RKFirebase.signInWithGoogle();
+        if (!profile) {
+            showAuthNotice(noticeId, 'Google sign-in was cancelled.', true);
+            return;
+        }
+        store.user = profile;
+        authSettled = true;
+        await loadUserCollections(store.user);
+        location.hash = postLoginHash(store.user);
+        if (appReady && typeof renderPage === 'function') renderPage();
     } catch (error) {
-        showAuthNotice(noticeId, error.message || 'Could not start Google Sign-In.', true);
+        showAuthNotice(noticeId, authErrorMessage(error), true);
     }
 }
 
@@ -1693,6 +2001,55 @@ async function handleLogin(event) {
     showAuthNotice('login-notice', '');
     const email = document.getElementById('login-email').value.trim().toLowerCase();
     const password = document.getElementById('login-password').value;
+    if (hasFirebase()) {
+        try {
+            const profile = await window.RKFirebase.signInWithEmail(email, password);
+            store.user = profile;
+            authSettled = true;
+            await loadUserCollections(store.user);
+            location.hash = postLoginHash(store.user);
+            if (appReady && typeof renderPage === 'function') renderPage();
+            return;
+        } catch (fbError) {
+            if (!['auth/user-not-found', 'auth/invalid-credential', 'auth/operation-not-allowed'].includes(fbError?.code)) {
+                showAuthNotice('login-notice', authErrorMessage(fbError), true);
+                return;
+            }
+            // Fallback: check migrated MongoDB password and enroll into Firebase Auth if enabled
+            try {
+                const legacy = await apiRequest('/api/auth/login', {
+                    method: 'POST',
+                    body: { email, password }
+                });
+                if (legacy?.user) {
+                    if (fbError?.code !== 'auth/operation-not-allowed') {
+                        try {
+                            const migratedProfile = await window.RKFirebase.registerWithEmail(legacy.user.name, email, password);
+                            store.user = migratedProfile || legacy.user;
+                            authSettled = true;
+                            await loadUserCollections(store.user);
+                            location.hash = postLoginHash(store.user);
+                            if (appReady && typeof renderPage === 'function') renderPage();
+                            return;
+                        } catch {
+                            // Fall through to verified legacy session if Firebase Email/Password isn't enabled
+                        }
+                    }
+                    setAuthToken(legacy.token);
+                    store.user = legacy.user;
+                    authSettled = true;
+                    await loadUserCollections(store.user);
+                    location.hash = postLoginHash(store.user);
+                    if (appReady && typeof renderPage === 'function') renderPage();
+                    return;
+                }
+            } catch {
+                // Report Firebase error below
+            }
+            showAuthNotice('login-notice', authErrorMessage(fbError), true);
+            return;
+        }
+    }
     try {
         const data = await apiRequest('/api/auth/login', {
             method: 'POST',
@@ -1724,6 +2081,21 @@ async function handleRegister(event) {
         showAuthNotice('register-notice', 'Passwords do not match. Please re-enter your password.', true);
         return;
     }
+    if (hasFirebase()) {
+        try {
+            const profile = await window.RKFirebase.registerWithEmail(name, email, password);
+            store.user = profile;
+            authSettled = true;
+            await loadUserCollections(store.user);
+            showToast('Account created! Please check your email to verify your address.', 'success');
+            location.hash = postLoginHash(store.user);
+            if (appReady && typeof renderPage === 'function') renderPage();
+            return;
+        } catch (error) {
+            showAuthNotice('register-notice', authErrorMessage(error), true);
+            return;
+        }
+    }
     try {
         await apiRequest('/api/auth/register', {
             method: 'POST',
@@ -1748,16 +2120,22 @@ async function handlePasswordReset(event) {
     const submitBtn = event.target?.querySelector('button[type="submit"]');
     if (submitBtn) submitBtn.disabled = true;
     try {
-        const result = await apiRequest('/api/auth/forgot-password', {
-            method: 'POST',
-            body: { email }
-        });
-        showAuthNotice(
-            'reset-notice',
-            result?.message || 'If an account exists for this email, a password reset link has been created.',
-            false
-        );
-        if (emailInput) emailInput.value = '';
+        if (hasFirebase()) {
+            await window.RKFirebase.sendPasswordReset(email);
+            showAuthNotice('reset-notice', 'If an account exists for this email, a password reset link has been sent to your inbox.', false);
+            if (emailInput) emailInput.value = '';
+        } else {
+            const result = await apiRequest('/api/auth/forgot-password', {
+                method: 'POST',
+                body: { email }
+            });
+            showAuthNotice(
+                'reset-notice',
+                result?.message || 'If an account exists for this email, a password reset link has been created.',
+                false
+            );
+            if (emailInput) emailInput.value = '';
+        }
     } catch (error) {
         showAuthNotice('reset-notice', authErrorMessage(error), true);
     } finally {
@@ -1840,13 +2218,19 @@ async function processOrder() {
         createdAtMs: Date.now()
     };
     try {
-        const saved = await Promise.race([
-            apiRequest('/api/orders', { method: 'POST', body: order }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Saving the order timed out.')), 8000))
-        ]);
-        if (saved?.order) {
-            if (user.isAdmin) store.allOrders = [...store.allOrders, saved.order];
-            else store.myOrders = [...store.myOrders, saved.order];
+        let savedOrder = null;
+        if (hasFirebaseUser()) {
+            savedOrder = await window.RKFirebase.createOrder(order);
+        } else {
+            const saved = await Promise.race([
+                apiRequest('/api/orders', { method: 'POST', body: order }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Saving the order timed out.')), 8000))
+            ]);
+            savedOrder = saved?.order || null;
+        }
+        if (savedOrder) {
+            if (user.isAdmin) store.allOrders = [...store.allOrders, savedOrder];
+            else store.myOrders = [...store.myOrders, savedOrder];
         }
     } catch (error) {
         // Never block the sale: the WhatsApp message still carries the full order.
@@ -1904,7 +2288,11 @@ async function updateProfile() {
     if (!user) return;
     const name = document.getElementById('profile-name').value.trim();
     try {
-        await apiRequest('/api/profile', { method: 'PATCH', body: { name } });
+        if (hasFirebaseUser()) {
+            await window.RKFirebase.updateProfileName(user.uid, name);
+        } else {
+            await apiRequest('/api/profile', { method: 'PATCH', body: { name } });
+        }
     } catch (error) {
         console.warn(error);
         showToast('Profile could not be updated. Check your connection and try again.', 'error');
@@ -1940,6 +2328,19 @@ async function saveCategories(
         if (list.length) cleanSubs[cat] = list;
     }
     try {
+        if (hasFirebaseUser()) {
+            const data = await window.RKFirebase.saveCategoriesMeta({
+                list: categories,
+                sizeCategories: sizeCategories.filter(category => categories.includes(category)),
+                colorCategories: colorCategories.filter(category => categories.includes(category)),
+                subcategories: cleanSubs
+            });
+            store.categories = Array.isArray(data.categories) ? data.categories : categories;
+            store.sizeCategories = Array.isArray(data.sizeCategories) ? data.sizeCategories : [];
+            store.colorCategories = Array.isArray(data.colorCategories) ? data.colorCategories : [];
+            store.subcategories = data.subcategories && typeof data.subcategories === 'object' ? data.subcategories : cleanSubs;
+            return true;
+        }
         const data = await apiRequest('/api/admin/categories', {
             method: 'PUT',
             body: {
@@ -2074,11 +2475,16 @@ async function removeCategory(button) {
     try {
         for (const prod of affectedProducts) {
             const updatedBody = { ...prod, category: '', subcategory: '' };
-            const res = await apiRequest(`/api/admin/products/${encodeURIComponent(String(prod.id))}`, {
-                method: 'PUT',
-                body: updatedBody
-            });
-            const savedProd = res?.product || updatedBody;
+            let savedProd = updatedBody;
+            if (hasFirebaseUser()) {
+                savedProd = await window.RKFirebase.saveProduct(prod.id, updatedBody);
+            } else {
+                const res = await apiRequest(`/api/admin/products/${encodeURIComponent(String(prod.id))}`, {
+                    method: 'PUT',
+                    body: updatedBody
+                });
+                savedProd = res?.product || updatedBody;
+            }
             store.products = store.products.map(item => (sameId(item.id, prod.id) ? savedProd : item));
         }
         const categories = getCategories().filter(item => item !== category);
@@ -2121,7 +2527,7 @@ function renderPhotoList() {
     const list = document.getElementById('product-photo-list');
     if (!list) return;
     list.innerHTML = modalPhotos.map((src, index) => `<div class="photo-thumb">
-        <img src="${escapeHtml(src)}" alt="Product photo ${index + 1}">
+        <img src="${escapeHtml(resolveAssetUrl(src))}" alt="Product photo ${index + 1}">
         ${index === 0 ? '<span class="photo-main-tag">Main</span>' : `<button type="button" class="photo-main-btn" onclick="makeMainPhoto(${index})">Make main</button>`}
         <button type="button" class="photo-remove" aria-label="Remove photo ${index + 1}" onclick="removeProductPhoto(${index})">×</button>
     </div>`).join('');
@@ -2378,13 +2784,34 @@ async function saveNewProduct(event) {
         saveBtn.textContent = 'Saving…';
     }
     try {
-        // Older photos saved at a larger size are shrunk so all photos fit cleanly.
-        const photos = await Promise.all(
+        // Compress oversized raw photos before uploading to Cloudinary / saving
+        let photos = await Promise.all(
             modalPhotos.map(src => (src.startsWith('data:image/') && src.length > PHOTO_BUDGET ? compressImage(src) : src))
         );
         const subcategory = (document.getElementById('p-subcategory')?.value || '').trim();
+        const targetId = existingIndex >= 0 ? String(products[existingIndex].id) : String(Date.now());
+
+        if (hasFirebaseUser()) {
+            const uploadedPhotos = [];
+            for (let i = 0; i < photos.length; i++) {
+                let src = photos[i];
+                if (typeof src === 'string' && src.startsWith('data:image/')) {
+                    const uploadRes = await apiRequest('/api/media/upload', {
+                        method: 'POST',
+                        body: { dataUri: src, productId: targetId, index: i }
+                    });
+                    if (!uploadRes?.url) {
+                        throw new Error('Could not upload photo to Cloudinary.');
+                    }
+                    src = uploadRes.url;
+                }
+                uploadedPhotos.push(src);
+            }
+            photos = uploadedPhotos;
+        }
+
         const product = {
-            id: existingIndex >= 0 ? products[existingIndex].id : Date.now(),
+            id: targetId,
             name: document.getElementById('p-name').value.trim(),
             price: normalPrice,
             image: photos[0],
@@ -2396,11 +2823,18 @@ async function saveNewProduct(event) {
         if (promoPrice !== null) product.promoPrice = promoPrice;
         if (bulk) Object.assign(product, bulk);
         if (Object.keys(built.options).length) product.options = built.options;
-        const saved = await apiRequest(`/api/admin/products/${encodeURIComponent(String(product.id))}`, {
-            method: 'PUT',
-            body: product
-        });
-        const nextProduct = saved?.product || product;
+
+        let nextProduct = product;
+        if (hasFirebaseUser()) {
+            nextProduct = await window.RKFirebase.saveProduct(targetId, product);
+        } else {
+            const saved = await apiRequest(`/api/admin/products/${encodeURIComponent(targetId)}`, {
+                method: 'PUT',
+                body: product
+            });
+            nextProduct = saved?.product || product;
+        }
+
         if (existingIndex >= 0) {
             store.products = store.products.map((item, idx) => idx === existingIndex ? nextProduct : item);
         } else {
@@ -2427,7 +2861,11 @@ async function saveNewProduct(event) {
 async function deleteProduct(id) {
     if (!(await askConfirm('Delete this product?'))) return;
     try {
-        await apiRequest(`/api/admin/products/${encodeURIComponent(String(id))}`, { method: 'DELETE' });
+        if (hasFirebaseUser()) {
+            await window.RKFirebase.deleteProduct(id);
+        } else {
+            await apiRequest(`/api/admin/products/${encodeURIComponent(String(id))}`, { method: 'DELETE' });
+        }
         store.products = store.products.filter(item => !sameId(item.id, id));
         showToast('Product deleted.', 'success');
     } catch (error) {
@@ -2448,12 +2886,14 @@ document.addEventListener('keydown', event => {
         closeProductModal();
     }
 });
+
 // Re-draw the current page when shared data changes on another device,
 // without interrupting typing, an open product form, or the current tab.
 function refreshView() {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
     const { page } = routeInfo();
     if (page === 'home') renderHome();
+    else if (page === 'category') renderCategory();
     else if (page === 'search') renderSearch();
     else if (page === 'admin') {
         if (document.getElementById('product-modal')?.hidden === false) return;
@@ -2485,6 +2925,53 @@ async function migratePhotosToCloudinary(button) {
     }
 }
 
+async function runMongoToFirebaseMigration(button) {
+    if (!hasFirebaseUser()) {
+        showToast('Please sign in with Google as admin first to migrate into Firebase.', 'error');
+        return;
+    }
+    if (store.migratingToFirebase) return;
+    store.migratingToFirebase = true;
+    store.migrationProgress = 'Exporting products, categories, user passwords & orders from MongoDB…';
+    if (button) button.disabled = true;
+    renderAdmin('overview');
+
+    try {
+        const exportData = await apiRequest('/api/admin/mongodb-export');
+        const uploadPhotoFn = exportData.cloudinaryConfigured
+            ? async (prodId, idx, dataUri) => {
+                const up = await apiRequest('/api/media/upload', {
+                    method: 'POST',
+                    body: { dataUri, productId: prodId, index: idx }
+                });
+                return up?.url || '';
+            }
+            : null;
+
+        const report = await window.RKFirebase.migrateFromMongoExport(exportData, {
+            uploadPhotoFn,
+            onProgress: (msg) => {
+                store.migrationProgress = msg;
+                const el = document.querySelector('.migration-progress');
+                if (el) el.textContent = msg;
+            }
+        });
+
+        store.needsMongoMigration = false;
+        store.migrationProgress = `Migration complete: ${report.products} products, ${report.categories} categories, ${report.users} users (${report.credentials} passwords), ${report.orders} orders, ${report.messages} messages${report.cloudinaryPhotos ? `, ${report.cloudinaryPhotos} photos uploaded to Cloudinary` : ''}.`;
+        await loadStoreData({ silent: true });
+        await loadUserCollections(store.user);
+        showToast('MongoDB to Firebase migration completed!', 'success');
+    } catch (error) {
+        console.warn('[Migration Error]', error);
+        store.migrationProgress = `Migration failed: ${error?.message || 'Unknown error'}`;
+        showToast(error?.message || 'Migration failed.', 'error');
+    } finally {
+        store.migratingToFirebase = false;
+        renderAdmin('overview');
+    }
+}
+
 setInterval(async () => {
     if (!appReady || document.visibilityState !== 'visible') return;
     await loadStoreData({ silent: true });
@@ -2495,20 +2982,25 @@ setInterval(async () => {
 function trackSiteVisit() {
     if (routeInfo().page === 'admin') return;
     try {
-        if (sessionStorage.getItem('rk_visit_logged')) return;
-        let visitorId = localStorage.getItem('rk_visitor_id');
-        if (!visitorId) {
-            visitorId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-                ? crypto.randomUUID()
-                : `v-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-            localStorage.setItem('rk_visitor_id', visitorId);
+        if (!sessionStorage.getItem('rk_visit_logged')) {
+            let visitorId = localStorage.getItem('rk_visitor_id');
+            if (!visitorId) {
+                visitorId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+                    ? crypto.randomUUID()
+                    : `v-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+                localStorage.setItem('rk_visitor_id', visitorId);
+            }
+            sessionStorage.setItem('rk_visit_logged', '1');
+            fetch(resolveApiUrl('/api/analytics/visit'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ visitorId })
+            }).catch(() => {});
         }
-        sessionStorage.setItem('rk_visit_logged', '1');
-        fetch('/api/analytics/visit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ visitorId })
-        }).catch(() => {});
+        if (hasFirebase() && !sessionStorage.getItem('rk_fb_site_view')) {
+            sessionStorage.setItem('rk_fb_site_view', '1');
+            window.RKFirebase.trackPageView({ type: 'site', targetId: 'site', label: 'Total Website Views' }).catch(() => {});
+        }
     } catch {
         // Ignore storage restrictions
     }
